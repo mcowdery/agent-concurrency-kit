@@ -1,6 +1,6 @@
 # agent-concurrency-kit
 
-Two small, dependency-free scripts for running several AI coding agents against one codebase at
+Three small, dependency-free scripts for running several AI coding agents against one codebase at
 once without them tripping over each other. No framework, no daemon, no config service — just git
 worktrees and lockfiles, which is all this problem actually needs.
 
@@ -15,8 +15,12 @@ roughly this order:
 - A dev server an agent is testing against getting reloaded mid-test because another agent saved an
   unrelated file.
 
-None of this needs a platform. It needs isolation (each agent gets its own checkout) and a queue
-(only one thing touches the contended resource at a time).
+- Five sessions running, and no way to know which one finished an hour ago or has been waiting on a
+  permission prompt since lunch, short of clicking through every terminal.
+
+None of this needs a platform. It needs isolation (each agent gets its own checkout), a queue (only
+one thing touches the contended resource at a time), and a way to hear from them (a notification
+when one finishes or needs you).
 
 ## `agent-worktree` — isolated checkouts per agent
 
@@ -62,6 +66,59 @@ await withLock('gpu', 'exclusive', async () => {
 A holder's lock is a file in the OS temp directory, named by its process id — if that process dies,
 the next check clears the lock automatically, so a crashed run can't jam the queue.
 
+## `agent-notify` — hear from your agents instead of checking on them
+
+```
+npx agent-notify setup --ntfy   # one-time: hooks into Claude Code, plus a private phone-push topic
+npx agent-notify status         # every live session at a glance
+npx agent-notify test           # send a sample to each channel, to check it reaches you
+```
+
+```
+waiting  acme/refactor-auth     3m  Claude needs your permission to use Bash
+running  acme                  12m
+done     acme/docs              1m
+
+1 waiting on you, 1 running, 1 done
+```
+
+`setup` adds Claude Code hooks to `~/.claude/settings.json` (your other settings and hooks are
+left alone; `setup --remove` takes them back out), so every project and every `agent-worktree`
+checkout is covered without per-repo configuration. Sessions in a worktree are named
+`<project>/<worktree>`. You are notified when a session **finishes** and when it **needs you**
+(a permission prompt, a question). Not when it starts, and not for the "still waiting for your
+input" reminder Claude Code repeats after a finish. Turns shorter than 20 seconds are not announced
+as finished (you were watching); change that with `minSeconds`.
+
+| Channel | What it is | Setup |
+|---|---|---|
+| `toast` | Desktop notification: Windows 10/11, macOS, or Linux (`notify-send`) | On by default |
+| `ntfy` | Phone push through the free [ntfy](https://ntfy.sh) app; "needs you" arrives at higher priority | `setup --ntfy`, then subscribe to the printed topic in the app |
+| `webhook` | Discord or Slack channel message | `"webhook": "<url>"` |
+| `command` | Anything else: runs your command with `AGENT_NOTIFY_TITLE`, `_BODY`, `_STATE`, `_LABEL` set | `"command": "..."` |
+
+Configuration is `~/.agent-notify.json` (each key also has an `AGENT_NOTIFY_*` env var; see the top
+of `notify.mjs`). ntfy and webhook turn on once configured; set `"channels": [...]` to choose
+explicitly. Messages carry only the project name and Claude Code's own status text, never code or
+output. For ntfy.sh the topic name is the only secret, which is why `setup --ntfy` generates a
+random one; or point `ntfy.server` at one you host yourself.
+
+**Quiet hours and mute.** `npx agent-notify mute 2h` (or `30m`, `1d`; `mute off` to lift it) silences
+every channel for a while, say for a meeting. For a nightly schedule add this to the config:
+
+```json
+{ "quietHours": { "start": "22:00", "end": "07:00", "allow": ["waiting"], "channels": ["ntfy"] } }
+```
+
+Local time, and the window may cross midnight. `allow` lists what still gets through (default
+`"waiting"`: a blocked agent matters more than a finished one; `[]` silences everything);
+`channels` limits which channels go quiet, e.g. only the phone (default: all). Muted or held-back
+events still update `status`, so it shows what finished overnight.
+
+The board is a small file per session under the OS temp dir. "waiting" stays until that turn ends,
+since Claude Code has no event for "you answered the prompt". A channel that fails never interrupts
+the session; errors are appended to `errors.log` next to the board.
+
 ## Install
 
 Not yet published to npm. Use directly from GitHub:
@@ -70,10 +127,11 @@ Not yet published to npm. Use directly from GitHub:
 npm install github:mcowdery/agent-concurrency-kit
 ```
 
-or clone it and run the two scripts with `node` directly — there's nothing else to build.
+or clone it and run the scripts with `node` directly — there's nothing else to build.
 
 ## Tests
 
-`npm test` runs the resource-queue behavior (exclusive holders never overlap, shared holders run
-concurrently, an exclusive holder waits out a shared one already in flight) against real concurrent
-child processes — `node --test test/*.test.mjs`.
+`npm test` runs `node --test test/*.test.mjs`. The resource-queue tests (exclusive holders never
+overlap, shared holders run concurrently, an exclusive holder waits out a shared one already in
+flight) use real concurrent child processes. The notify tests drive the real hook with Claude Code's
+JSON and check what would be sent, the board, and that `setup` edits settings safely.
