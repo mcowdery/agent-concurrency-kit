@@ -163,7 +163,7 @@ test('mute silences every channel until it is lifted, and the board keeps updati
   s.fire('Notification', { message: 'Claude needs your permission to use Bash' });
   s.fire('Stop');
   assert.deepEqual(s.sent(), []);
-  assert.match(s.cli(['status']).stdout, /muted until[\s\S]*done/);
+  assert.match(s.cli(['status']).stdout, /done[\s\S]*muted until/);
 
   assert.match(s.cli(['mute', 'off']).stdout, /unmuted/);
   s.fire('UserPromptSubmit');

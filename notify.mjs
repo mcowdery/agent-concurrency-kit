@@ -111,7 +111,7 @@ export function inQuietHours(date, { start, end } = {}) {
   return from < to ? now >= from && now < to : now >= from || now < to;
 }
 
-const muteUntil = () => readJson(join(DIR, 'mute.json'), {}).until ?? 0;
+const muteUntil = () => readJson(join(DIR, 'mute'), {}).until ?? 0;
 
 /** The channels that should hear about `ev` right now, after mute and quiet hours. */
 export function channelsFor(ev, cfg, now = Date.now()) {
@@ -253,6 +253,8 @@ async function hook(input) {
   }
 
   if (ev && prev?.notified?.state === ev.state && now - prev.notified.at < DEBOUNCE_MS) ev = null;
+  // Held back by mute or quiet hours does not count as told, or the next real one would be dropped.
+  const channels = ev ? channelsFor(ev, cfg, now) : [];
 
   writeFileSync(
     file,
@@ -264,12 +266,12 @@ async function hook(input) {
       turnStart: event === 'UserPromptSubmit' ? now : prev?.turnStart,
       updated: now,
       message: state === 'waiting' ? input.message : undefined,
-      notified: ev ? { state: ev.state, at: now } : prev?.notified,
+      notified: channels.length ? { state: ev.state, at: now } : prev?.notified,
     }),
   );
 
-  if (!ev) return;
-  for (const r of await send(ev, { ...cfg, channels: channelsFor(ev, cfg, now) })) {
+  if (!channels.length) return;
+  for (const r of await send(ev, { ...cfg, channels })) {
     if (r.error) appendFileSync(join(DIR, 'errors.log'), `${new Date().toISOString()} ${r.channel}: ${r.error}\n`);
   }
 }
@@ -308,6 +310,8 @@ function status() {
   }
   const n = (state) => rows.filter((r) => r.state === state).length;
   console.log(`\n${n('waiting')} waiting on you, ${n('running')} running, ${n('done')} done`);
+  const until = muteUntil();
+  if (until > now) console.log(`muted until ${new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
 }
 
 // ---- setup ----
@@ -345,7 +349,7 @@ function setup({ remove, ntfy }) {
 }
 
 function mute(arg) {
-  const file = join(DIR, 'mute.json');
+  const file = join(DIR, 'mute');
   if (arg === 'off') {
     drop(file);
     return console.log('unmuted');
