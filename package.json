@@ -1,0 +1,22 @@
+{
+  "name": "agent-concurrency-kit",
+  "version": "0.1.0",
+  "description": "Two small, dependency-free tools for running several AI coding agents against one codebase without them colliding: isolated git worktrees, and a lockfile queue for a resource only one agent can use at a time (a GPU, a port, a rate-limited API).",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "agent-worktree": "./worktree.mjs",
+    "agent-resource-queue": "./resource-queue.mjs"
+  },
+  "files": [
+    "worktree.mjs",
+    "resource-queue.mjs"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mcowdery/agent-concurrency-kit.git"
+  }
+}
