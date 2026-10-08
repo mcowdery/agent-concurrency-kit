@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -61,7 +61,15 @@ test('an exclusive holder waits out a shared one already running', async () => {
   const logFile = join(dir, 'log.ndjson');
   const resource = `test-mixed-${Date.now()}`;
 
-  await Promise.all([hold(resource, 'shared', 250, logFile), hold(resource, 'exclusive', 50, logFile)]);
+  // The shared holder must really be holding before the exclusive one arrives: started together, the
+  // exclusive process can win the race, run to the end and finish first, which is correct but not what
+  // this test is about.
+  const shared = hold(resource, 'shared', 250, logFile);
+  for (let i = 0; !(existsSync(logFile) && events(logFile).some((e) => e.mode === 'shared' && e.event === 'start')); i++) {
+    assert.ok(i < 500, 'the shared holder never started');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  await Promise.all([shared, hold(resource, 'exclusive', 50, logFile)]);
 
   const evts = events(logFile);
   const sharedEnd = evts.find((e) => e.mode === 'shared' && e.event === 'end').t;

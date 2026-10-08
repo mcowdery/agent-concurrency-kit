@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-notify</title>
+<link rel="icon" id="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23888'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #0d1117; --panel: #161b22; --raised: #21262d; --field: #0d1117;
+    --ink: #e6edf3; --muted: #8b949e; --line: #30363d;
+    --waiting: #ff6b6b; --waiting-bg: #2a1519;
+    --running: #58a6ff; --done: #3fb950;
+    --sans: "Bahnschrift", "DIN Alternate", "Roboto Condensed", "Arial Narrow", Arial, sans-serif;
+    --mono: "Cascadia Mono", "Consolas", "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; border-radius: 0; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; color: var(--ink); font: 15px/1.45 var(--sans); min-height: 100vh;
+    background:
+      linear-gradient(rgba(13, 17, 23, .45), rgba(13, 17, 23, .72)),
+      url(/background.jpg) center / cover fixed,
+      linear-gradient(rgba(139, 148, 158, .045) 1px, transparent 1px) 0 0 / 48px 48px fixed,
+      linear-gradient(90deg, rgba(139, 148, 158, .045) 1px, transparent 1px) 0 0 / 48px 48px fixed,
+      radial-gradient(900px 520px at 12% -8%, rgba(88, 166, 255, .16), transparent 70%) fixed,
+      radial-gradient(800px 480px at 100% 0, rgba(63, 185, 80, .09), transparent 70%) fixed,
+      var(--page);
+  }
+  main { max-width: 820px; margin: 0 auto; padding: 22px 16px 48px; }
+  .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+  .ic { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  #summary { display: flex; gap: 12px; align-items: center; font: 13px var(--mono); color: var(--muted); }
+  .chip { display: inline-flex; align-items: center; gap: 5px; }
+  .chip .ic { width: 15px; height: 15px; }
+  .chip.waiting { color: var(--waiting); } .chip.running { color: var(--running); } .chip.done { color: var(--done); }
+  .spacer { flex: 1; }
+  .group { display: flex; }
+  .group > .ib + .ib { margin-left: -1px; }
+
+  /* icon button: a square with one glyph in it; the words live in the tooltip */
+  .ib {
+    display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0;
+    color: var(--muted); background: var(--panel); border: 1px solid var(--line); cursor: pointer;
+  }
+  .ib:hover { color: var(--ink); border-color: var(--muted); position: relative; }
+  .ib[aria-pressed="true"] { color: var(--ink); background: var(--raised); border-color: var(--muted); position: relative; }
+  .ib:disabled { opacity: .45; cursor: default; }
+  .ib[hidden] { display: none; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; font: 14px var(--sans); color: var(--ink);
+    background: var(--raised); border: 1px solid var(--line); padding: 6px 12px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--muted); }
+  .btn .ic { width: 15px; height: 15px; }
+  .btn.primary { background: var(--ink); color: var(--page); border-color: var(--ink); font-weight: 600; }
+  .btn.primary:hover { background: #fff; }
+  button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--running); outline-offset: 2px; }
+
+  .banner { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); padding: 8px 12px; margin-bottom: 10px; color: var(--muted); font-size: 14px; }
+
+  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .note { color: var(--muted); font-size: 13px; }
+
+  ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  li { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line); padding: 10px 14px; display: grid; gap: 3px; }
+  li.waiting { border-left-color: var(--waiting); background: var(--waiting-bg); }
+  li.running { border-left-color: var(--running); }
+  li.done { border-left-color: var(--done); }
+  .top { display: flex; align-items: center; gap: 10px; }
+  .state { display: inline-flex; }
+  .waiting .state { color: var(--waiting); } .running .state { color: var(--running); } .done .state { color: var(--done); }
+  .running .state .ic { animation: pulse 1.8s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .running .state .ic { animation: none; } }
+  .label { font-weight: 600; font-size: 16px; overflow-wrap: anywhere; }
+  .age { margin-left: auto; color: var(--muted); font: 13px/1 var(--mono); white-space: nowrap; }
+  .message { overflow-wrap: anywhere; }
+  .message:empty { display: none; }
+  .actions { display: flex; align-items: center; }
+  .actions a { display: inline-flex; color: var(--muted); }
+  .actions a:hover { color: var(--ink); }
+
+  /* list layout: one tight line per session, columns lined up */
+  ul.rows { gap: 0; border-top: 1px solid var(--line); }
+  ul.rows li { display: flex; align-items: center; gap: 12px; padding: 5px 12px; border: 0; border-bottom: 1px solid var(--line); border-left: 3px solid var(--line); min-height: 34px; }
+  ul.rows li.waiting { border-left-color: var(--waiting); }
+  ul.rows li.running { border-left-color: var(--running); }
+  ul.rows li.done { border-left-color: var(--done); }
+  ul.rows .top { display: contents; }
+  ul.rows .top > .state { order: 0; }
+  ul.rows .top > .label { order: 1; flex: 0 0 240px; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul.rows .message, ul.rows .message:empty { order: 2; display: block; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul.rows li.waiting .message { white-space: normal; overflow-wrap: anywhere; }
+  ul.rows .actions { order: 3; flex: none; width: 18px; }
+  ul.rows .top > .age { order: 4; margin-left: 0; flex: 0 0 76px; text-align: right; }
+  @media (max-width: 640px) { ul.rows .top > .label { flex-basis: 130px; } ul.rows .actions { display: none; } }
+
+  .empty { display: grid; justify-items: center; gap: 10px; color: var(--muted); padding: 40px 0; text-align: center; }
+  .empty .ic { width: 28px; height: 28px; }
+  footer { margin-top: 18px; color: var(--muted); font-size: 13px; }
+
+  /* settings */
+  fieldset { background: var(--panel); border: 1px solid var(--line); margin: 0 0 14px; padding: 4px 16px 12px; }
+  legend { padding: 0 8px; background: var(--panel); font-weight: 600; font-size: 14px; color: var(--muted); }
+  .chan { padding: 12px 0; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
+  .chan:last-child { border-bottom: 0; }
+  .chan .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .chan .head label { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+  .desc, .result { color: var(--muted); font-size: 13px; }
+  .result.bad { color: var(--waiting); }
+  .fields { display: grid; gap: 8px; padding-left: 26px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  label.field { display: grid; gap: 3px; font-size: 13px; color: var(--muted); }
+  input[type="text"], input[type="url"], input[type="number"], input[type="time"] {
+    font: 14px var(--mono); color: var(--ink); background: var(--field); border: 1px solid var(--line); padding: 7px 10px; min-width: 0;
+  }
+  input[type="text"], input[type="url"] { width: 100%; max-width: 440px; }
+  input[type="number"] { width: 96px; }
+  input[type="checkbox"] { accent-color: var(--done); width: 15px; height: 15px; }
+  .savebar { display: flex; align-items: center; gap: 12px; position: sticky; bottom: 0; padding: 10px 14px; background: var(--panel); border: 1px solid var(--line); margin-bottom: 14px; }
+  #saved.bad { color: var(--waiting); }
+  .checks { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 14px; }
+  .checks label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); }
+</style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></symbol>
+  <symbol id="i-bell-off" viewBox="0 0 24 24"><path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M18.63 13A17.89 17.89 0 0 1 18 8"/><path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"/><path d="M18 8a6 6 0 0 0-9.33-5"/><line x1="1" y1="1" x2="23" y2="23"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></symbol>
+  <symbol id="i-volume-off" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></symbol>
+  <symbol id="i-type" viewBox="0 0 24 24"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></symbol>
+  <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M9 2h6"/></symbol>
+  <symbol id="i-arrow-up" viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></symbol>
+  <symbol id="i-arrow-down" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+  <symbol id="i-tick" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+</svg>
+<main>
+  <header>
+    <h1>Sessions</h1>
+    <span id="summary" aria-live="polite"></span>
+    <span class="spacer"></span>
+    <button id="notify" class="ib" type="button" title="Allow browser notifications" aria-label="Allow browser notifications"><svg class="ic"><use href="#i-bell"/></svg></button>
+    <button id="sound" class="ib" type="button" aria-pressed="false" title="Sound on alerts" aria-label="Sound on alerts"><svg class="ic"><use id="sound-use" href="#i-volume-off"/></svg></button>
+    <nav class="group" aria-label="View">
+      <button id="nav-sessions" class="ib" type="button" aria-pressed="true" title="Sessions" aria-label="Sessions"><svg class="ic"><use href="#i-list"/></svg></button>
+      <button id="nav-settings" class="ib" type="button" aria-pressed="false" title="Settings" aria-label="Settings"><svg class="ic"><use href="#i-sliders"/></svg></button>
+    </nav>
+  </header>
+
+  <section id="view-sessions">
+    <div id="banner" class="banner" hidden><svg class="ic"><use href="#i-bell-off"/></svg><span id="banner-text"></span></div>
+    <div class="toolbar">
+      <div class="group" role="group" aria-label="Sort by">
+        <button class="ib" type="button" data-sort="activity" aria-pressed="true" title="Sort by last activity" aria-label="Sort by last activity"><svg class="ic"><use href="#i-clock"/></svg></button>
+        <button class="ib" type="button" data-sort="status" aria-pressed="false" title="Sort by status" aria-label="Sort by status"><svg class="ic"><use href="#i-flag"/></svg></button>
+        <button class="ib" type="button" data-sort="name" aria-pressed="false" title="Sort by name" aria-label="Sort by name"><svg class="ic"><use href="#i-type"/></svg></button>
+        <button class="ib" type="button" data-sort="time" aria-pressed="false" title="Sort by time in this state" aria-label="Sort by time in this state"><svg class="ic"><use href="#i-timer"/></svg></button>
+      </div>
+      <button id="sort-dir" class="ib" type="button" title="Reverse order" aria-label="Reverse order"><svg class="ic"><use id="dir-use" href="#i-arrow-down"/></svg></button>
+      <span id="sort-note" class="note"></span>
+      <span class="spacer"></span>
+      <div class="group" role="group" aria-label="Layout">
+        <button id="lay-rows" class="ib" type="button" aria-pressed="true" title="List" aria-label="List"><svg class="ic"><use href="#i-list"/></svg></button>
+        <button id="lay-cards" class="ib" type="button" aria-pressed="false" title="Cards" aria-label="Cards"><svg class="ic"><use href="#i-grid"/></svg></button>
+      </div>
+    </div>
+    <ul id="list" aria-live="polite"></ul>
+    <div id="empty" class="empty" hidden><svg class="ic"><use href="#i-inbox"/></svg><span>No Claude Code sessions yet. Start one and it shows up here.</span></div>
+    <footer>Pin this tab. It updates every two seconds and puts the number of sessions waiting on you in the tab title.</footer>
+  </section>
+
+  <section id="view-settings" hidden>
+    <form id="form">
+      <fieldset>
+        <legend>Where alerts go</legend>
+        <div class="chan">
+          <div class="head"><label><input type="checkbox" data-chan="dashboard"> This page</label><button type="button" class="btn" data-test="dashboard"><svg class="ic"><use href="#i-play"/></svg>Test</button><span class="result" data-result="dashboard"></span></div>
+          <div class="desc">Browser notifications from this tab; clicking one brings the tab forward. Use the bell at the top to allow them. The tab must stay open.</div>
+        </div>
+        <div class="chan">
+          <div class="head"><label><input type="checkbox" data-chan="toast"> Desktop toast</label><button type="button" class="btn" data-test="toast"><svg class="ic"><use href="#i-play"/></svg>Test</button><span class="result" data-result="toast"></span></div>
+          <div class="desc">A system notification (Windows, macOS or Linux). On Windows, clicking it does nothing, and it is hidden while Do Not Disturb is on.</div>
+        </div>
+        <div class="chan">
+          <div class="head"><label><input type="checkbox" data-chan="ntfy"> Phone push (ntfy)</label><button type="button" class="btn" data-test="ntfy"><svg class="ic"><use href="#i-play"/></svg>Test</button><span class="result" data-result="ntfy"></span></div>
+          <div class="desc">Needs the free ntfy app, subscribed to your topic. Anyone who knows the topic can read your alerts, so keep it random.</div>
+          <div class="fields">
+            <label class="field">Topic
+              <span class="row"><input type="text" id="ntfy-topic" spellcheck="false"><button type="button" class="btn" id="gen-topic"><svg class="ic"><use href="#i-refresh"/></svg>Generate</button></span></label>
+            <label class="field">Server<input type="url" id="ntfy-server" spellcheck="false" placeholder="https://ntfy.sh"></label>
+          </div>
+        </div>
+        <div class="chan">
+          <div class="head"><label><input type="checkbox" data-chan="webhook"> Discord or Slack webhook</label><button type="button" class="btn" data-test="webhook"><svg class="ic"><use href="#i-play"/></svg>Test</button><span class="result" data-result="webhook"></span></div>
+          <div class="fields"><label class="field">Webhook address<input type="url" id="webhook" spellcheck="false" placeholder="https://discord.com/api/webhooks/..."></label></div>
+        </div>
+        <div class="chan">
+          <div class="head"><label><input type="checkbox" data-chan="command"> Run a command</label><button type="button" class="btn" data-test="command"><svg class="ic"><use href="#i-play"/></svg>Test</button><span class="result" data-result="command"></span></div>
+          <div class="desc">Runs on this PC for every alert, with AGENT_NOTIFY_TITLE, _BODY, _STATE and _LABEL set. Only turn this on for a command you trust.</div>
+          <div class="fields"><label class="field">Command<input type="text" id="command" spellcheck="false"></label></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>When to alert</legend>
+        <div class="chan">
+          <label class="field">Skip "finished" for turns shorter than (seconds)<input type="number" id="min-seconds" min="0" step="1"></label>
+          <div class="desc">You were probably watching. Alerts for "needs you" are never skipped by this.</div>
+        </div>
+        <div class="chan">
+          <div class="head"><label><input type="checkbox" id="qh-on"> Quiet hours</label></div>
+          <div class="fields" id="qh-fields">
+            <div class="row">
+              <label class="field">From<input type="time" id="qh-start"></label>
+              <label class="field">Until<input type="time" id="qh-end"></label>
+            </div>
+            <div class="checks">Still alert for:
+              <label><input type="checkbox" id="qh-waiting"> needs you</label>
+              <label><input type="checkbox" id="qh-done"> finished</label>
+            </div>
+            <div class="checks">Quiet only on (none ticked = all):
+              <label><input type="checkbox" data-qh-chan="dashboard"> page</label>
+              <label><input type="checkbox" data-qh-chan="toast"> toast</label>
+              <label><input type="checkbox" data-qh-chan="ntfy"> phone</label>
+              <label><input type="checkbox" data-qh-chan="webhook"> webhook</label>
+              <label><input type="checkbox" data-qh-chan="command"> command</label>
+            </div>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="savebar"><button class="btn primary" type="submit"><svg class="ic"><use href="#i-tick"/></svg>Save</button><span id="saved" role="status"></span></div>
+    </form>
+
+    <fieldset>
+      <legend>Mute alerts</legend>
+      <div class="row">
+        <button type="button" class="btn" data-mute="30m">30 min</button>
+        <button type="button" class="btn" data-mute="1h">1 hour</button>
+        <button type="button" class="btn" data-mute="2h">2 hours</button>
+        <button type="button" class="btn" data-mute="8h">8 hours</button>
+        <button type="button" class="btn" data-mute="off">Unmute</button>
+        <span class="result" id="mute-state"></span>
+      </div>
+    </fieldset>
+    <p class="desc" id="config-path"></p>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const list = $('list');
+  const seen = new Map();     // session -> latest `notified.at` already announced
+  let primed = false;         // the first poll only records what already happened
+  let sound = false;
+  let audio = null;
+  let latest = null;
+  let fetchedAt = Date.now();
+
+  const pref = (key, value) => {
+    try {
+      if (value === undefined) return localStorage.getItem(key);
+      localStorage.setItem(key, value);
+    } catch { return null; }
+  };
+
+  const NS = 'http://www.w3.org/2000/svg';
+  function icon(name, size) {
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'ic');
+    svg.setAttribute('aria-hidden', 'true');
+    if (size) { svg.style.width = size + 'px'; svg.style.height = size + 'px'; }
+    const use = document.createElementNS(NS, 'use');
+    use.setAttribute('href', '#i-' + name);
+    svg.append(use);
+    return svg;
+  }
+
+  function age(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  }
+
+  function beep(urgent) {
+    if (!sound) return;
+    try {
+      audio ??= new AudioContext();
+      const o = audio.createOscillator();
+      const g = audio.createGain();
+      o.frequency.value = urgent ? 880 : 520;
+      g.gain.setValueAtTime(0.15, audio.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.35);
+      o.connect(g).connect(audio.destination);
+      o.start();
+      o.stop(audio.currentTime + 0.4);
+    } catch {}
+  }
+
+  function announce(s) {
+    const n = s.notified;
+    beep(n.state === 'waiting');
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const note = new Notification(s.label, { body: n.body || n.state, tag: s.session, requireInteraction: n.state === 'waiting' });
+      note.onclick = () => { window.focus(); note.close(); };
+    }
+  }
+
+  // ---- sorting ----
+
+  const STATE_RANK = { waiting: 0, running: 1, done: 2 };
+  const SORTS = {
+    status: (a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || b.since - a.since,
+    name: (a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base', numeric: true }),
+    time: (a, b) => b.since - a.since,         // ascending = shortest time in state first
+    activity: (a, b) => a.updated - b.updated, // ascending = least recently active first
+  };
+  // Picking a sort starts it in the direction people usually want: newest first for activity.
+  const DEFAULT_ASC = { status: true, name: true, time: true, activity: false };
+  let sortKey = SORTS[pref('sortKey')] ? pref('sortKey') : 'activity';
+  let sortAsc = pref('sortDir') ? pref('sortDir') === 'asc' : DEFAULT_ASC[sortKey];
+
+  function sortRows(rows) {
+    const by = SORTS[sortKey];
+    const sign = sortAsc ? 1 : -1;
+    // ties fall back to name, then to when it started, so the order never jumps around between polls
+    return rows.slice().sort((a, b) => sign * by(a, b) || a.label.localeCompare(b.label) || a.since - b.since);
+  }
+
+  function syncSortControls() {
+    for (const b of document.querySelectorAll('[data-sort]')) b.setAttribute('aria-pressed', String(b.dataset.sort === sortKey));
+    const words = {
+      status: ['Needs you first', 'Finished first'],
+      name: ['A to Z', 'Z to A'],
+      time: ['Shortest first', 'Longest first'],
+      activity: ['Oldest first', 'Newest first'],
+    };
+    $('dir-use').setAttribute('href', sortAsc ? '#i-arrow-up' : '#i-arrow-down');
+    $('sort-note').textContent = words[sortKey][sortAsc ? 0 : 1];
+  }
+
+  function resort() {
+    pref('sortKey', sortKey);
+    pref('sortDir', sortAsc ? 'asc' : 'desc');
+    syncSortControls();
+    if (!latest) return;
+    const keep = fetchedAt;   // redrawing is not a new poll: leave the age clock alone
+    render(latest);
+    fetchedAt = keep;
+  }
+
+  for (const b of document.querySelectorAll('[data-sort]')) {
+    b.addEventListener('click', () => {
+      if (b.dataset.sort === sortKey) sortAsc = !sortAsc;
+      else { sortKey = b.dataset.sort; sortAsc = DEFAULT_ASC[sortKey]; }
+      resort();
+    });
+  }
+  $('sort-dir').addEventListener('click', () => { sortAsc = !sortAsc; resort(); });
+  syncSortControls();
+
+  // ---- layout ----
+
+  let layout = pref('layout') === 'cards' ? 'cards' : 'rows';
+  function applyLayout() {
+    list.className = layout;
+    $('lay-rows').setAttribute('aria-pressed', String(layout === 'rows'));
+    $('lay-cards').setAttribute('aria-pressed', String(layout === 'cards'));
+  }
+  for (const [id, value] of [['lay-rows', 'rows'], ['lay-cards', 'cards']]) {
+    $(id).addEventListener('click', () => { layout = value; pref('layout', value); applyLayout(); });
+  }
+  applyLayout();
+
+  // ---- the sessions ----
+
+  const STATE_ICON = { waiting: 'alert', running: 'activity', done: 'check' };
+  const STATE_TEXT = { waiting: 'Needs you', running: 'Running', done: 'Finished' };
+
+  function chip(state, n) {
+    const el = document.createElement('span');
+    el.className = 'chip ' + state;
+    el.title = n + ' ' + STATE_TEXT[state].toLowerCase();
+    el.append(icon(STATE_ICON[state]), String(n));
+    return el;
+  }
+
+  function render(data) {
+    latest = data;
+    fetchedAt = Date.now();
+    const rows = sortRows(data.sessions);
+    const count = (state) => rows.filter((r) => r.state === state).length;
+    const waiting = count('waiting');
+    $('summary').replaceChildren(...(rows.length ? ['waiting', 'running', 'done'].map((st) => chip(st, count(st))) : []));
+    document.title = waiting ? '(' + waiting + ') waiting \u00b7 agent-notify' : 'agent-notify';
+    const color = waiting ? '%23ff6b6b' : count('running') ? '%2358a6ff' : rows.length ? '%233fb950' : '%23888';
+    $('icon').href = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='" + color + "'/%3E%3C/svg%3E";
+
+    const banner = $('banner');
+    banner.hidden = !data.mutedUntil;
+    if (data.mutedUntil) $('banner-text').textContent = 'Alerts muted until ' + new Date(data.mutedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '. This page keeps updating.';
+
+    $('empty').hidden = rows.length > 0;
+    list.replaceChildren(...rows.map((s) => {
+      const li = document.createElement('li');
+      li.className = s.state;
+      const top = document.createElement('div');
+      top.className = 'top';
+      const state = document.createElement('span');
+      state.className = 'state';
+      state.title = STATE_TEXT[s.state];
+      state.setAttribute('role', 'img');
+      state.setAttribute('aria-label', STATE_TEXT[s.state]);
+      state.append(icon(STATE_ICON[s.state]));
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = s.label;
+      label.title = s.label;
+      const ageEl = document.createElement('span');
+      ageEl.className = 'age';
+      ageEl.dataset.since = s.since;
+      ageEl.textContent = age(data.now - s.since);
+      top.append(state, label, ageEl);
+      li.append(top);
+      const m = document.createElement('div');
+      m.className = 'message';
+      if (s.state === 'waiting' && s.message) {
+        m.textContent = s.message;
+        m.title = s.message;
+      }
+      li.append(m);
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      if (s.path) {
+        const a = document.createElement('a');
+        a.href = 'vscode://file/' + encodeURI(s.path.split('\\').join('/'));
+        a.title = 'Open this folder in VS Code';
+        a.setAttribute('aria-label', 'Open ' + s.label + ' in VS Code');
+        a.append(icon('folder'));
+        actions.append(a);
+      }
+      li.append(actions);
+      return li;
+    }));
+
+    for (const s of rows) {
+      const at = s.notified ? s.notified.at : 0;
+      if (primed && at > (seen.get(s.session) ?? 0)) announce(s);
+      seen.set(s.session, at);
+    }
+    primed = true;
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.status);
+      render(await res.json());
+    } catch {
+      $('summary').textContent = 'dashboard stopped: restart it with agent-notify dashboard';
+      document.title = 'stopped \u00b7 agent-notify';
+    }
+  }
+
+  // Ages tick between polls using the server's clock offset, so they stay right if the PC clock is off.
+  setInterval(() => {
+    if (!latest) return;
+    const now = latest.now + (Date.now() - fetchedAt);
+    document.querySelectorAll('.age').forEach((el) => { el.textContent = age(now - Number(el.dataset.since)); });
+  }, 1000);
+
+  // ---- header buttons ----
+
+  const notifyBtn = $('notify');
+  function syncNotifyBtn() {
+    if (!('Notification' in window)) { notifyBtn.hidden = true; return; }
+    const p = Notification.permission;
+    notifyBtn.hidden = p === 'granted';
+    notifyBtn.disabled = p === 'denied';
+    notifyBtn.title = p === 'denied' ? 'Notifications are blocked in the browser settings for this site' : 'Allow browser notifications';
+    notifyBtn.firstElementChild.firstElementChild.setAttribute('href', p === 'denied' ? '#i-bell-off' : '#i-bell');
+  }
+  notifyBtn.addEventListener('click', async () => { await Notification.requestPermission(); syncNotifyBtn(); });
+  syncNotifyBtn();
+
+  const soundBtn = $('sound');
+  function syncSound() {
+    soundBtn.setAttribute('aria-pressed', String(sound));
+    $('sound-use').setAttribute('href', sound ? '#i-volume' : '#i-volume-off');
+    soundBtn.title = sound ? 'Sound on alerts: on' : 'Sound on alerts: off';
+  }
+  sound = pref('sound') === '1';
+  syncSound();
+  soundBtn.addEventListener('click', () => {
+    sound = !sound;
+    pref('sound', sound ? '1' : '0');
+    syncSound();
+    if (sound) beep(false);
+  });
+
+  // ---- settings ----
+
+  const form = $('form');
+  const chans = () => [...document.querySelectorAll('[data-chan]')];
+  const api = async (path, body) => {
+    const res = await fetch(path, body === undefined ? { cache: 'no-store' } : {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Agent-Notify': '1' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'request failed (' + res.status + ')');
+    return data;
+  };
+
+  function fill(c) {
+    for (const box of chans()) box.checked = c.channels.includes(box.dataset.chan);
+    $('ntfy-topic').value = c.ntfy.topic;
+    $('ntfy-server').value = c.ntfy.server;
+    $('webhook').value = c.webhook;
+    $('command').value = c.command;
+    $('min-seconds').value = c.minSeconds;
+    const q = c.quietHours;
+    $('qh-on').checked = !!q;
+    $('qh-start').value = q ? q.start.padStart(5, '0') : '22:00';
+    $('qh-end').value = q ? q.end.padStart(5, '0') : '07:00';
+    const allow = q ? q.allow || ['waiting'] : ['waiting'];
+    $('qh-waiting').checked = allow.includes('waiting');
+    $('qh-done').checked = allow.includes('done');
+    for (const box of document.querySelectorAll('[data-qh-chan]')) box.checked = !!(q && q.channels && q.channels.includes(box.dataset.qhChan));
+    syncQuiet();
+    $('mute-state').textContent = c.mutedUntil ? 'Muted until ' + new Date(c.mutedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Not muted';
+    $('config-path').textContent = 'Saved to ' + c.configPath + '. Changes apply to the next alert.';
+  }
+
+  function syncQuiet() {
+    for (const el of $('qh-fields').querySelectorAll('input')) el.disabled = !$('qh-on').checked;
+  }
+  $('qh-on').addEventListener('change', syncQuiet);
+
+  function collect() {
+    const on = $('qh-on').checked;
+    return {
+      channels: chans().filter((b) => b.checked).map((b) => b.dataset.chan),
+      ntfy: { topic: $('ntfy-topic').value, server: $('ntfy-server').value },
+      webhook: $('webhook').value,
+      command: $('command').value,
+      minSeconds: $('min-seconds').value,
+      quietHours: on ? {
+        start: $('qh-start').value,
+        end: $('qh-end').value,
+        allow: ['waiting', 'done'].filter((k) => $('qh-' + k).checked),
+        channels: [...document.querySelectorAll('[data-qh-chan]')].filter((b) => b.checked).map((b) => b.dataset.qhChan),
+      } : null,
+    };
+  }
+
+  async function save() {
+    const out = $('saved');
+    out.className = '';
+    try {
+      fill(await api('/api/config', collect()));
+      out.textContent = 'Saved';
+      setTimeout(() => { if (out.textContent === 'Saved') out.textContent = ''; }, 3000);
+      return true;
+    } catch (err) {
+      out.className = 'bad';
+      out.textContent = err.message;
+      return false;
+    }
+  }
+  form.addEventListener('submit', (e) => { e.preventDefault(); save(); });
+
+  $('gen-topic').addEventListener('click', () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(9));
+    $('ntfy-topic').value = 'claude-' + [...bytes].map((b) => (b % 36).toString(36)).join('');
+  });
+
+  for (const btn of document.querySelectorAll('[data-test]')) {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.test;
+      const out = document.querySelector('[data-result="' + name + '"]');
+      out.className = 'result';
+      if (name === 'dashboard') {
+        if (!('Notification' in window) || Notification.permission !== 'granted') {
+          out.className = 'result bad';
+          out.textContent = 'Allow notifications first (the bell at the top).';
+        } else {
+          const note = new Notification('agent-notify test', { body: 'If you can read this, this page can alert you.' });
+          note.onclick = () => { window.focus(); note.close(); };
+          out.textContent = 'Sent. Nothing showing? Check Windows Focus / Do Not Disturb.';
+        }
+        return;
+      }
+      out.textContent = 'Sending...';
+      if (!(await save())) { out.className = 'result bad'; out.textContent = 'Fix the setting first.'; return; }
+      try {
+        const r = await api('/api/test', { channel: name });
+        out.className = r.error ? 'result bad' : 'result';
+        out.textContent = r.error ? 'Failed: ' + r.error : 'Sent';
+      } catch (err) {
+        out.className = 'result bad';
+        out.textContent = err.message;
+      }
+    });
+  }
+
+  for (const btn of document.querySelectorAll('[data-mute]')) {
+    btn.addEventListener('click', async () => {
+      try { fill(await api('/api/mute', { duration: btn.dataset.mute })); } catch (err) { $('mute-state').textContent = err.message; }
+    });
+  }
+
+  function show(view) {
+    const settings = view === 'settings';
+    document.querySelector('h1').textContent = settings ? 'Settings' : 'Sessions';
+    $('view-sessions').hidden = settings;
+    $('view-settings').hidden = !settings;
+    $('nav-sessions').setAttribute('aria-pressed', String(!settings));
+    $('nav-settings').setAttribute('aria-pressed', String(settings));
+    if (settings) api('/api/config').then(fill).catch((err) => { $('saved').className = 'bad'; $('saved').textContent = err.message; });
+    if (location.hash !== '#' + view) history.replaceState(null, '', '#' + view);
+  }
+  $('nav-sessions').addEventListener('click', () => show('sessions'));
+  $('nav-settings').addEventListener('click', () => show('settings'));
+  if (location.hash === '#settings') show('settings');
+
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>

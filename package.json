@@ -12,7 +12,8 @@
   "files": [
     "worktree.mjs",
     "resource-queue.mjs",
-    "notify.mjs"
+    "notify.mjs",
+    "dashboard.html"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs"
