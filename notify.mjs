@@ -8,6 +8,7 @@
 //   npx agent-notify status                      every live session: waiting / running / done
 //   npx agent-notify dashboard [--open]          the same board as a live page on http://localhost:7878,
 //                                                with clickable browser notifications; pin the tab
+//   npx agent-notify autostart [on|off]          start the dashboard at login (Windows)
 //   npx agent-notify test                        send a sample to each configured channel
 //   npx agent-notify mute <2h|30m|off>           silence every channel for a while (the board
 //                                                still updates); `mute` alone says if you are muted
@@ -30,21 +31,24 @@
 // to silence everything); `channels` limits which channels go quiet (default: all of them).
 // {"minSeconds": 20} (default) skips "finished" for turns shorter than that — you were watching.
 //
-// The board is one small file per session under the OS temp dir. "waiting" stays until the turn
-// ends (Claude Code has no event for "you answered"), so read it as "needed you at some point".
+// The board is one small file per session under the OS temp dir. A prompt or any tool use marks a
+// session running (so work that no prompt started still shows), and it leaves the board when its
+// Claude Code process has exited.
 import { execFileSync, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 const SELF = fileURLToPath(import.meta.url);
 const DIR = process.env.AGENT_NOTIFY_DIR ?? join(tmpdir(), 'agent-concurrency-kit', 'notify');
 const CONFIG = process.env.AGENT_NOTIFY_CONFIG ?? join(homedir(), '.agent-notify.json');
 const SETTINGS = process.env.AGENT_NOTIFY_SETTINGS ?? join(homedir(), '.claude', 'settings.json');
-const EVENTS = ['UserPromptSubmit', 'Notification', 'Stop', 'SessionEnd'];
+// PreToolUse / PostToolUse say "it is working" for turns that no prompt started (a scheduled wake-up, a
+// queued command, a finished background task) and for "waiting" once you have answered. Both only ever
+// update the board; they never alert.
+const EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SessionEnd'];
+const WORKING_REFRESH_MS = 15000; // a session already "running" is not rewritten more often than this
 const STALE_MS = 12 * 3600e3;
 // A turn that has been "running" this long with no event at all was almost certainly cut off: Claude
 // Code sends no "finished" when you press Esc, and none if the window closes mid-turn.
@@ -308,16 +312,23 @@ async function hook(input) {
   if (event === 'SessionEnd') return drop(file);
   if (!EVENTS.includes(event)) return;
 
-  mkdirSync(DIR, { recursive: true });
-  const cfg = loadConfig();
   const prev = readJson(file, null);
   const now = Date.now();
+  // Tool events run on every tool call, so the common case (already running, seen a moment ago) must cost
+  // almost nothing: leave before the config is read or git is asked anything.
+  const working = event === 'PreToolUse' || event === 'PostToolUse';
+  if (working && prev?.state === 'running' && now - prev.updated < WORKING_REFRESH_MS) return;
+
+  mkdirSync(DIR, { recursive: true });
+  const cfg = loadConfig();
   const top = root(input.cwd);
   const label = labelFor(top);
 
   let state;
   let ev = null;
   if (event === 'UserPromptSubmit') {
+    state = 'running';
+  } else if (working) {
     state = 'running';
   } else if (event === 'Notification') {
     // Claude Code re-pings "waiting for your input" a minute after every Stop; that is not news.
@@ -347,7 +358,9 @@ async function hook(input) {
       path: top,
       state,
       since: prev?.state === state ? prev.since : now,
-      turnStart: event === 'UserPromptSubmit' ? now : prev?.turnStart,
+      // a new turn starts at a prompt, or when a finished (or never-seen) session starts working again on its own
+      turnStart:
+        event === 'UserPromptSubmit' || (state === 'running' && (!prev || prev.state === 'done')) ? now : prev?.turnStart,
       updated: now,
       message: state === 'waiting' ? input.message : undefined,
       notified: channels.length ? { state: ev.state, at: now, body: ev.body } : prev?.notified,
@@ -434,7 +447,9 @@ async function readJsonBody(req) {
   return text ? JSON.parse(text) : {};
 }
 
-function dashboard({ open }) {
+// node:http is loaded here, not at the top: the hook runs on every tool call and never needs it.
+async function dashboard({ open }) {
+  const { createServer } = await import('node:http');
   const wanted = Number(process.env.AGENT_NOTIFY_PORT ?? 7878);
   const server = createServer((req, res) => {
     // Only this machine may ask, and only under a local name: a web page elsewhere must not be able
@@ -513,7 +528,7 @@ function dashboard({ open }) {
 
 const isOurs = (h) => typeof h.command === 'string' && h.command.includes('notify.mjs') && / hook$/.test(h.command);
 
-function setup({ remove, ntfy }) {
+async function setup({ remove, ntfy }) {
   let settings = {};
   try {
     settings = JSON.parse(readFileSync(SETTINGS, 'utf8'));
@@ -537,6 +552,7 @@ function setup({ remove, ntfy }) {
   if (ntfy && !remove) {
     const cfg = readJson(CONFIG, {});
     cfg.ntfy ??= {};
+    const { randomBytes } = await import('node:crypto');
     cfg.ntfy.topic ??= `claude-${randomBytes(9).toString('base64url').toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
     writeFileSync(CONFIG, JSON.stringify(cfg, null, 2) + '\n');
     console.log(`\nphone push: install the ntfy app and subscribe to the topic\n  ${cfg.ntfy.topic}\non ${cfg.ntfy.server ?? 'https://ntfy.sh'}. The topic name is the only secret; saved in ${CONFIG}.`);
@@ -557,6 +573,45 @@ function setMute(arg) {
   }
   const until = muteUntil();
   return until > Date.now() ? until : 0;
+}
+
+// ---- start the dashboard at login (Windows: a shortcut in the Startup folder) ----
+
+const STARTUP_DIR = process.env.AGENT_NOTIFY_STARTUP_DIR ?? join(process.env.APPDATA ?? homedir(), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+const STARTUP_LNK = join(STARTUP_DIR, 'agent-notify dashboard.lnk');
+
+const STARTUP_PS = `
+$sh = (New-Object -ComObject WScript.Shell).CreateShortcut($env:AGENT_NOTIFY_LNK)
+$sh.TargetPath = $env:AGENT_NOTIFY_TARGET
+$sh.Arguments = $env:AGENT_NOTIFY_ARGS
+$sh.WorkingDirectory = $env:AGENT_NOTIFY_CWD
+$sh.WindowStyle = 7
+$sh.Description = 'agent-notify dashboard (http://localhost:7878)'
+$sh.Save()
+`;
+
+function autostart(arg) {
+  if (process.platform !== 'win32') {
+    fail('autostart is Windows only. Elsewhere, start `node ' + SELF + ' dashboard` from your login items or a systemd user service.');
+  }
+  if (arg === 'on') {
+    mkdirSync(STARTUP_DIR, { recursive: true });
+    const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+    const env = {
+      ...process.env,
+      AGENT_NOTIFY_LNK: STARTUP_LNK,
+      // conhost --headless runs node with no console window at all
+      AGENT_NOTIFY_TARGET: join(system, 'conhost.exe'),
+      AGENT_NOTIFY_ARGS: `--headless "${process.execPath}" "${SELF}" dashboard`,
+      AGENT_NOTIFY_CWD: dirname(SELF),
+    };
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(STARTUP_PS, 'utf16le').toString('base64')], { env, stdio: 'ignore', timeout: 30000 });
+  } else if (arg === 'off') {
+    drop(STARTUP_LNK);
+  } else if (arg) {
+    fail('usage: agent-notify autostart [on|off]');
+  }
+  console.log(existsSync(STARTUP_LNK) ? `the dashboard starts at login (${STARTUP_LNK})` : 'the dashboard does not start at login');
 }
 
 function mute(arg) {
@@ -596,15 +651,17 @@ async function main() {
   } else if (cmd === 'status') {
     status();
   } else if (cmd === 'dashboard') {
-    dashboard({ open: flags.has('--open') });
+    await dashboard({ open: flags.has('--open') });
   } else if (cmd === 'setup') {
-    setup({ remove: flags.has('--remove'), ntfy: flags.has('--ntfy') });
+    await setup({ remove: flags.has('--remove'), ntfy: flags.has('--ntfy') });
+  } else if (cmd === 'autostart') {
+    autostart(rest[0]);
   } else if (cmd === 'mute') {
     mute(rest[0]);
   } else if (cmd === 'test') {
     await test();
   } else {
-    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | dashboard [--open] | mute [duration|off] | test>');
+    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | dashboard [--open] | autostart [on|off] | mute [duration|off] | test>');
   }
 }
 

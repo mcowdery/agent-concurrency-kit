@@ -71,6 +71,7 @@ the next check clears the lock automatically, so a crashed run can't jam the que
 npx agent-notify setup          # one-time: adds the hooks to Claude Code
 npx agent-notify dashboard      # a live page of every session, at http://localhost:7878
 npx agent-notify status         # the same board in the terminal
+npx agent-notify autostart on   # start the dashboard at login (Windows; `off` undoes it)
 npx agent-notify mute 2h        # silence alerts for a while (30m, 1d, off)
 npx agent-notify test           # send a sample to each channel, to check it reaches you
 ```
@@ -106,7 +107,10 @@ changes the port). Pin the tab.
   `notify.mjs` and the page uses it behind a dark overlay. It is git-ignored, so yours is never
   committed by accident.
 
-The dashboard only runs while its command does; start it again after a reboot.
+The dashboard only runs while its command does. On Windows, `npx agent-notify autostart on` puts a
+shortcut in your Startup folder so it comes back at every login, with no console window;
+`autostart off` removes it. Elsewhere, start `node notify.mjs dashboard` from your login items or a
+systemd user service.
 
 ### Channels
 
@@ -150,9 +154,15 @@ The board is a small file per session under the OS temp dir. A session leaves it
 reports the session ended, when the Claude Code process that owned it has exited, or, for a session
 recorded without a process id, after 3 hours of "running" with no event at all. (Claude Code sends
 no "finished" when you interrupt a turn with Esc, so without this a cut-off turn would show as
-running for hours.) "waiting" stays until that turn ends, since Claude Code has no event for "you
-answered the prompt". A channel that fails never interrupts the session; errors are appended to
-`errors.log` next to the board.
+running for hours.)
+
+"Running" is set by a prompt, and also by tool use: a turn that no prompt started (a scheduled
+wake-up, a queued command, a finished background task) shows as running as soon as the agent uses
+a tool, and a session that was waiting on you returns to running when its tool call completes.
+These tool events only update the board, never alert, and cost about 10 ms over a bare Node start
+because a session already running is not rewritten more than every 15 seconds. A session that is
+quietly thinking with no tool call yet can still read as "done" for a moment. A channel that fails
+never interrupts the session; errors are appended to `errors.log` next to the board.
 
 ## Install
 

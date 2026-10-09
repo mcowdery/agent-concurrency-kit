@@ -340,3 +340,68 @@ test('the hook records the Claude Code process id', () => {
   const file = readdirSync(join(s.dir, 'board')).find((n) => n.endsWith('.json'));
   assert.equal(JSON.parse(readFileSync(join(s.dir, 'board', file), 'utf8')).pid, process.pid);
 });
+
+const stateOf = (s) => {
+  const out = s.cli(['status']).stdout;
+  return /^(waiting|running|done)/m.exec(out)?.[1];
+};
+
+test('tool use marks a session working again, with no prompt and no alert', () => {
+  const s = sandbox();
+  s.fire('UserPromptSubmit');
+  s.fire('Stop');
+  assert.equal(stateOf(s), 'done');
+  const alerts = s.sent().length;
+  // pretend that first "finished" was a while ago, so the duplicate filter (3 s) does not swallow the next
+  const file = join(s.dir, 'board', readdirSync(join(s.dir, 'board')).find((n) => n.endsWith('.json')));
+  const rec = JSON.parse(readFileSync(file, 'utf8'));
+  rec.notified.at -= 60000;
+  writeFileSync(file, JSON.stringify(rec));
+
+  // a scheduled wake-up or queued command: no prompt, but the agent starts using tools
+  s.fire('PreToolUse', { tool_name: 'Bash' });
+  assert.equal(stateOf(s), 'running');
+  s.fire('Stop');
+  assert.equal(stateOf(s), 'done');
+  assert.equal(s.sent().length, alerts + 1); // only the new "finished"; the tool event itself never alerts
+});
+
+test('a session waiting on you goes back to running when its tool call completes', () => {
+  const s = sandbox();
+  s.fire('UserPromptSubmit');
+  s.fire('Notification', { message: 'Claude needs your permission to use Bash' });
+  assert.equal(stateOf(s), 'waiting');
+  s.fire('PostToolUse', { tool_name: 'Bash' });
+  assert.equal(stateOf(s), 'running');
+  assert.equal(s.sent().length, 1); // just the permission request
+});
+
+test('tool events from a session already running leave its record alone', () => {
+  const s = sandbox();
+  s.fire('UserPromptSubmit');
+  const file = join(s.dir, 'board', readdirSync(join(s.dir, 'board')).find((n) => n.endsWith('.json')));
+  const before = readFileSync(file, 'utf8');
+  s.fire('PreToolUse');
+  s.fire('PostToolUse');
+  assert.equal(readFileSync(file, 'utf8'), before); // not rewritten: this runs on every tool call
+});
+
+test('setup installs the tool-use hooks too', () => {
+  const s = sandbox();
+  s.cli(['setup']);
+  const hooks = JSON.parse(readFileSync(join(s.dir, 'settings.json'), 'utf8')).hooks;
+  for (const event of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SessionEnd']) {
+    assert.equal(hooks[event]?.length, 1, event);
+  }
+});
+
+test('autostart adds and removes a login shortcut', { skip: process.platform !== 'win32' }, () => {
+  const startup = join(mkdtempSync(join(tmpdir(), 'ack-startup-')), 'Startup');
+  const s = sandbox({ AGENT_NOTIFY_STARTUP_DIR: startup });
+  assert.match(s.cli(['autostart']).stdout, /does not start/);
+  assert.match(s.cli(['autostart', 'on']).stdout, /starts at login/);
+  assert.ok(existsSync(join(startup, 'agent-notify dashboard.lnk')));
+  assert.match(s.cli(['autostart', 'off']).stdout, /does not start/);
+  assert.equal(existsSync(join(startup, 'agent-notify dashboard.lnk')), false);
+  assert.notEqual(s.cli(['autostart', 'sideways']).status, 0);
+});
