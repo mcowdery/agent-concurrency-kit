@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { applySettings, inQuietHours, labelFor } from '../notify.mjs';
+import { applySettings, costOf, inQuietHours, labelFor, relativeTo, topicOf } from '../notify.mjs';
 
 const RECORDER = fileURLToPath(new URL('./fixtures/record.mjs', import.meta.url)).split('\\').join('/');
 const SCRIPT = fileURLToPath(new URL('../notify.mjs', import.meta.url));
@@ -32,6 +32,13 @@ function sandbox(extraEnv = {}) {
   const sent = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) : []);
   return { dir, env, cli, fire, sent };
 }
+
+test('a topic is the prompt on one short line', () => {
+  assert.equal(topicOf('  fix the\n login   bug '), 'fix the login bug');
+  assert.equal(topicOf(''), undefined);
+  assert.equal(topicOf(undefined), undefined);
+  assert.equal(topicOf('x'.repeat(200)).length, 120);
+});
 
 test('labels a worktree as project/name and anything else by folder', () => {
   assert.equal(labelFor(['C:', 'code', 'acme', '.agents', 'refactor-auth'].join(String.fromCharCode(92))), 'acme/refactor-auth');
@@ -69,6 +76,61 @@ test('needing you notifies, but the idle reminder after a finish does not', () =
   s.fire('Notification', { message: 'Claude is waiting for your input' });
   assert.equal(s.sent().length, 2); // permission + finished, nothing for the idle ping
   assert.match(s.cli(['status']).stdout, /done/);
+});
+
+test('a finished turn records the tokens logged during it, once per message', () => {
+  const s = sandbox();
+  const transcript = join(s.dir, 'transcript.jsonl');
+  const msg = (id, u) => JSON.stringify({ type: 'assistant', message: { id, model: 'claude-x', usage: u } }) + '\n';
+  writeFileSync(transcript, msg('old', { input_tokens: 999, output_tokens: 999 })); // before the turn: not counted
+  s.fire('UserPromptSubmit', { transcript_path: transcript });
+  // the same message logged twice (streaming) counts once, with its latest usage
+  writeFileSync(transcript, readFileSync(transcript, 'utf8') + msg('a', { input_tokens: 10, output_tokens: 1 }) + msg('a', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }) + msg('b', { input_tokens: 2, output_tokens: 3, cache_creation_input_tokens: 7 }));
+  s.fire('Stop', { transcript_path: transcript });
+  const logged = readFileSync(join(s.env.AGENT_NOTIFY_DIR, 'usage.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(logged.length, 1);
+  assert.deepEqual([logged[0].input, logged[0].output, logged[0].cacheWrite, logged[0].cacheRead, logged[0].messages], [12, 8, 7, 100, 2]);
+  assert.match(s.cli(['status']).stdout, /119 in \/ 8 out this session/);
+  assert.match(s.cli(['usage']).stdout, /1 turns.*119 in \/ 8 out/);
+
+  // a second Stop with nothing new logged adds nothing; the next turn adds on top
+  s.fire('Stop', { transcript_path: transcript });
+  s.fire('UserPromptSubmit', { transcript_path: transcript });
+  writeFileSync(transcript, readFileSync(transcript, 'utf8') + msg('c', { input_tokens: 1, output_tokens: 1 }));
+  s.fire('Stop', { transcript_path: transcript });
+  assert.match(s.cli(['status']).stdout, /120 in \/ 9 out this session/);
+  assert.match(s.cli(['usage']).stdout, /2 turns/);
+});
+
+test('the board keeps the last real prompt and the active model, and notifications never carry the prompt', () => {
+  const s = sandbox();
+  const transcript = join(s.dir, 'transcript.jsonl');
+  const msg = (model) => JSON.stringify({ type: 'assistant', message: { id: model, model, usage: { input_tokens: 1, output_tokens: 1 } } }) + '\n';
+  writeFileSync(transcript, '');
+  const board = () => JSON.parse(readFileSync(join(s.env.AGENT_NOTIFY_DIR, 's1.json'), 'utf8'));
+
+  s.fire('UserPromptSubmit', { transcript_path: transcript, prompt: 'refactor   the auth\nmiddleware' });
+  writeFileSync(transcript, msg('claude-sonnet-5-5'));
+  s.fire('Stop', { transcript_path: transcript });
+  assert.equal(board().lastPrompt, 'refactor the auth middleware');
+  assert.equal(board().model, 'claude-sonnet-5-5');
+  assert.ok(s.sent().every((line) => !line.includes('auth middleware')));
+
+  s.fire('UserPromptSubmit', { transcript_path: transcript, prompt: '/model opus' }); // a command, not work
+  assert.equal(board().lastPrompt, 'refactor the auth middleware');
+
+  s.fire('UserPromptSubmit', { transcript_path: transcript, prompt: 'now the tests' });
+  writeFileSync(transcript, readFileSync(transcript, 'utf8') + msg('claude-opus-5-5'));
+  s.fire('Stop', { transcript_path: transcript });
+  assert.equal(board().lastPrompt, 'now the tests');
+  assert.equal(board().model, 'claude-opus-5-5');
+  assert.match(s.cli(['status']).stdout, /opus-5-5.*"now the tests"/);
+});
+
+test('showPrompt off keeps prompts off the board', () => {
+  const s = sandbox({ AGENT_NOTIFY_SHOW_PROMPT: 'false' });
+  s.fire('UserPromptSubmit', { prompt: 'secret plan' });
+  assert.ok(!readFileSync(join(s.env.AGENT_NOTIFY_DIR, 's1.json'), 'utf8').includes('lastPrompt'));
 });
 
 test('a session that ends leaves the board', () => {
@@ -345,6 +407,73 @@ const stateOf = (s) => {
   const out = s.cli(['status']).stdout;
   return /^(waiting|running|done)/m.exec(out)?.[1];
 };
+
+const recordOf = (s) => {
+  const dir = join(s.dir, 'board');
+  return JSON.parse(readFileSync(join(dir, readdirSync(dir).find((n) => n.endsWith('.json'))), 'utf8'));
+};
+
+test('prices are matched by model family, and an unknown model has no estimate', () => {
+  const u = { input_tokens: 1e6, output_tokens: 1e6, cache_creation_input_tokens: 1e6, cache_read_input_tokens: 1e6 };
+  assert.equal(costOf('claude-opus-5-5', u), 4 + 20 + 5 + 0.2);
+  assert.equal(costOf('claude-sonnet-5-5-20260101', u), 2 + 10 + 2.5 + 0.2);
+  assert.equal(costOf('some-other-model', u), null);
+});
+
+test('files are shown relative to the project', () => {
+  assert.equal(relativeTo('C:\\code\\acme', 'C:\\code\\acme\\src\\a.js'), 'src/a.js');
+  assert.equal(relativeTo('/home/me/acme', '/etc/hosts'), '/etc/hosts');
+});
+
+test('a finished turn records context, cost, last words, files, history and branch', () => {
+  const s = sandbox();
+  const line = (o) => JSON.stringify(o);
+  const transcript = join(s.dir, 't.jsonl');
+  writeFileSync(transcript, '');
+  s.fire('UserPromptSubmit', { transcript_path: transcript });
+  writeFileSync(transcript, [
+    line({ type: 'ai-title', aiTitle: 'Fix the login bug' }),
+    line({ type: 'assistant', message: { id: 'm1', model: 'claude-opus-5-5', usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 5000 },
+      content: [{ type: 'tool_use', name: 'Edit', input: { file_path: join(s.dir, 'src', 'a.js') } }] } }),
+    line({ type: 'assistant', message: { id: 'm2', model: 'claude-opus-5-5', usage: { input_tokens: 10, output_tokens: 30, cache_read_input_tokens: 6000 },
+      content: [{ type: 'text', text: 'All  done,\nthe bug is fixed.' }] } }),
+  ].join('\n') + '\n');
+  s.fire('Stop', { transcript_path: transcript });
+  const r = recordOf(s);
+  assert.equal(r.topic, 'Fix the login bug');
+  assert.deepEqual(r.context, { tokens: 6010, window: 200000 });
+  assert.ok(r.cost > 0);
+  assert.equal(r.lastText, 'All done, the bug is fixed.');
+  assert.deepEqual(r.files, ['src/a.js']);
+  assert.equal(r.history.length, 1);
+});
+
+test('a muted session still shows on the board but sends no alerts', () => {
+  const s = sandbox();
+  s.fire('UserPromptSubmit');
+  const dir = join(s.dir, 'board');
+  const file = join(dir, readdirSync(dir).find((n) => n.endsWith('.json')));
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), muted: true }));
+  s.fire('Notification', { message: 'Claude needs your permission to use Bash' });
+  assert.equal(stateOf(s), 'waiting');
+  assert.equal(s.sent().length, 0);
+  assert.equal(recordOf(s).muted, true);
+});
+
+test('clear hides finished sessions, keeps them hidden, and brings one back when it works again', () => {
+  const s = sandbox();
+  s.fire('UserPromptSubmit', { prompt: 'fix the login bug' });
+  s.fire('Stop');
+  s.fire('UserPromptSubmit', { session_id: 's2' });   // a second session, still running
+  assert.match(s.cli(['status']).stdout, /^done/m);
+  assert.match(s.cli(['clear']).stdout, /cleared 1 /);
+  assert.equal(stateOf(s), 'running');                  // s2 stays; s1 is gone from the board
+  // Claude Code's idle re-ping rewrites a finished session's record; it must not bring it back
+  s.fire('Notification', { message: 'Claude is waiting for your input', notification_type: 'idle_prompt' });
+  assert.doesNotMatch(s.cli(['status']).stdout, /^done/m);
+  s.fire('UserPromptSubmit');
+  assert.equal(s.cli(['status']).stdout.match(/^running/gm).length, 2);
+});
 
 test('tool use marks a session working again, with no prompt and no alert', () => {
   const s = sandbox();

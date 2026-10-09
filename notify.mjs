@@ -6,10 +6,13 @@
 //                                                ~/.claude/settings.json; --ntfy also creates a
 //                                                private phone-push topic and prints it
 //   npx agent-notify status                      every live session: waiting / running / done
-//   npx agent-notify dashboard [--open]          the same board as a live page on http://localhost:7878,
+//   npx agent-notify usage [--since 7d]          tokens used per project / worktree, summed from the log
+//                                                of finished turns (usage.jsonl beside the board)
+//   npx agent-notify dashboard [--open]         the same board as a live page on http://localhost:7878,
 //                                                with clickable browser notifications; pin the tab
 //   npx agent-notify autostart [on|off]          start the dashboard at login (Windows)
 //   npx agent-notify test                        send a sample to each configured channel
+//   npx agent-notify clear                      hide finished sessions from the board (they return if they start working again)
 //   npx agent-notify mute <2h|30m|off>           silence every channel for a while (the board
 //                                                still updates); `mute` alone says if you are muted
 //
@@ -30,12 +33,13 @@
 // states that still get through (default "waiting": a blocked agent beats a finished one; use []
 // to silence everything); `channels` limits which channels go quiet (default: all of them).
 // {"minSeconds": 20} (default) skips "finished" for turns shorter than that — you were watching.
+// {"showPrompt": false} (or AGENT_NOTIFY_SHOW_PROMPT=false) stops the board keeping each session's last prompt.
 //
 // The board is one small file per session under the OS temp dir. A prompt or any tool use marks a
 // session running (so work that no prompt started still shows), and it leaves the board when its
 // Claude Code process has exited.
 import { execFileSync, spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,11 +89,164 @@ const duration = (ms) => {
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 };
 
+const fileSize = (file) => {
+  try {
+    return file ? statSync(file).size : undefined;
+  } catch {}
+};
+
+/**
+ * Token usage in a Claude Code transcript (JSONL) from byte `from` on, or null if there is none.
+ * The log can repeat one API message across entries, so the last usage seen per message id counts.
+ * `end` is where the read stopped, to start the next turn from.
+ */
+export function transcriptUsage(file, from = 0) {
+  let text;
+  let end;
+  try {
+    const size = statSync(file).size;
+    end = size;
+    const start = from <= size ? from : 0;
+    const fd = openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(size - start);
+      readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString('utf8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+  const seen = new Map();
+  const files = new Set();
+  let lastText;
+  for (const line of text.split('\n')) {
+    if (!line.includes('"usage"')) continue;
+    try {
+      const e = JSON.parse(line);
+      const m = e.message;
+      if (!m?.usage) continue;
+      seen.set(m.id ?? `line${seen.size}`, { usage: m.usage, model: m.model, main: !e.isSidechain });
+      if (e.isSidechain || !Array.isArray(m.content)) continue;
+      for (const b of m.content) {
+        if (b.type === 'text' && b.text?.trim()) lastText = b.text;
+        const f = b.type === 'tool_use' && EDIT_TOOLS.includes(b.name) && (b.input?.file_path ?? b.input?.notebook_path);
+        if (f) files.add(f);
+      }
+    } catch {} // a half-written last line
+  }
+  if (!seen.size) return null;
+  const sum = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, messages: seen.size, end, files: [...files], lastText };
+  for (const { usage: u, model, main } of seen.values()) {
+    sum.input += u.input_tokens ?? 0;
+    sum.output += u.output_tokens ?? 0;
+    sum.cacheWrite += u.cache_creation_input_tokens ?? 0;
+    sum.cacheRead += u.cache_read_input_tokens ?? 0;
+    sum.cost += costOf(model, u) ?? 0;
+    if (model && model !== '<synthetic>') sum.model = model;
+    // what the last request carried is how full the context window is
+    if (main) sum.context = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+  }
+  return sum;
+}
+
+const EDIT_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
+
+// Dollars per million tokens: [input, output, cache read]. Cache writes are billed at 1.25x input. These are list
+// prices for the Claude API, matched by the start of the model id (longest first); a model not listed has no
+// estimate rather than a wrong one. Update when prices change.
+const PRICES = [
+  ['claude-fable-5', [10, 50, 0.25]],
+  ['claude-mythos-5', [10, 50, 0.25]],
+  ['claude-opus-5-5', [4, 20, 0.2]],
+  ['claude-opus-5', [5, 25, 0.5]],
+  ['claude-opus-4-8', [5, 25, 0.5]],
+  ['claude-opus-4-7', [5, 25, 0.5]],
+  ['claude-opus-4-6', [5, 25, 0.5]],
+  ['claude-sonnet-5', [2, 10, 0.2]],
+  ['claude-sonnet-4', [3, 15, 0.3]],
+  ['claude-haiku-5', [0.1, 0.5, 0.01]],
+  ['claude-haiku-4-5', [1, 5, 0.1]],
+].sort((a, b) => b[0].length - a[0].length);
+
+/** Estimated dollars for one API message's usage, or null when the model's price is not known. */
+export function costOf(model, u) {
+  const p = PRICES.find(([prefix]) => String(model ?? '').startsWith(prefix))?.[1];
+  if (!p) return null;
+  const [inp, out, read] = p;
+  return ((u.input_tokens ?? 0) * inp + (u.cache_creation_input_tokens ?? 0) * inp * 1.25 + (u.cache_read_input_tokens ?? 0) * read + (u.output_tokens ?? 0) * out) / 1e6;
+}
+
+const add = (a, b) => ({ input: (a?.input ?? 0) + b.input, output: (a?.output ?? 0) + b.output, cacheWrite: (a?.cacheWrite ?? 0) + b.cacheWrite, cacheRead: (a?.cacheRead ?? 0) + b.cacheRead });
+const inTokens = (u) => u.input + u.cacheWrite + u.cacheRead;
+const compact = (n) => (n < 1000 ? String(n) : n < 1e6 ? `${(n / 1e3).toFixed(n < 1e4 ? 1 : 0)}k` : `${(n / 1e6).toFixed(1)}M`);
+const tokensText = (u) => `${compact(inTokens(u))} in / ${compact(u.output)} out`;
+
 /** "<project>/<worktree>" for a checkout made by agent-worktree, else just the folder's name. */
 export function labelFor(cwd) {
   const m = /^(.*?)[\\/]\.agents[\\/]([^\\/]+)/.exec(cwd ?? '');
   if (m) return `${basename(m[1])}/${m[2]}`;
   return basename(cwd ?? '') || 'claude';
+}
+
+/** A prompt squeezed into one short line, or undefined if there is nothing to show. */
+export function topicOf(prompt) {
+  const text = String(prompt ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  return text.length > 120 ? text.slice(0, 119) + '…' : text;
+}
+
+/**
+ * The session's name as Claude Code shows it (the "ai-title" line near the top of the transcript), else the
+ * first thing a human asked. `titled` says which, because a title can arrive after the first prompt.
+ */
+export function transcriptTopic(file) {
+  let text;
+  try {
+    const fd = openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(131072);
+      text = buf.toString('utf8', 0, readSync(fd, buf, 0, buf.length, 0));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+  let prompt;
+  for (const line of text.split('\n')) {
+    if (!line.includes('"ai-title"') && !line.includes('"type":"user"')) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e.type === 'ai-title' && e.aiTitle) return { topic: topicOf(e.aiTitle), titled: true };
+      if (prompt || e.type !== 'user' || e.isMeta || e.isSidechain) continue;
+      const c = e.message?.content;
+      const t = typeof c === 'string' ? c : c?.find?.((b) => b.type === 'text')?.text;
+      // slash commands and hook output are recorded as user lines but are not what the session is about
+      if (t && !t.startsWith('<')) prompt = topicOf(t);
+    } catch {}
+  }
+  return prompt ? { topic: prompt, titled: false } : null;
+}
+
+/** `file` as a path inside `top` with forward slashes when it is in there, else unchanged. */
+export function relativeTo(top, file) {
+  const a = String(file).split('\\').join('/');
+  const b = String(top ?? '').split('\\').join('/').replace(/\/$/, '');
+  return b && a.toLowerCase().startsWith(b.toLowerCase() + '/') ? a.slice(b.length + 1) : a;
+}
+
+/** The checked-out branch and how many files have uncommitted changes, or nothing outside a git checkout. */
+function gitInfo(cwd) {
+  const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    const branch = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+    const dirty = git('status', '--porcelain').split('\n').filter(Boolean).length;
+    return { branch, dirty };
+  } catch {
+    return {};
+  }
 }
 
 // A session's cwd can be a subfolder; the repo root is what names the project.
@@ -114,7 +271,8 @@ function loadConfig({ fileOnly = false } = {}) {
     env.AGENT_NOTIFY_CHANNELS?.split(',').map((s) => s.trim()).filter(Boolean) ??
     file.channels ?? ['toast', ...(ntfy.topic ? ['ntfy'] : []), ...(webhook ? ['webhook'] : []), ...(command ? ['command'] : [])];
   const minSeconds = Number(env.AGENT_NOTIFY_MIN_SECONDS ?? file.minSeconds ?? 20);
-  return { channels, ntfy, webhook, command, minSeconds, quietHours: file.quietHours, file };
+  const showPrompt = !/^(0|false|off|no)$/i.test(String(env.AGENT_NOTIFY_SHOW_PROMPT ?? file.showPrompt ?? true));
+  return { channels, ntfy, webhook, command, minSeconds, showPrompt, quietHours: file.quietHours, file };
 }
 
 const clock = (hhmm) => {
@@ -173,6 +331,7 @@ export function applySettings(file, body) {
     if (!Number.isFinite(n) || n < 0) throw new Error('minimum turn length must be 0 or more seconds');
     out.minSeconds = n;
   }
+  if (has('showPrompt')) out.showPrompt = body.showPrompt === true;
   if (has('quietHours')) {
     const q = body.quietHours;
     if (q === null) {
@@ -347,14 +506,77 @@ async function hook(input) {
 
   if (ev && prev?.notified?.state === ev.state && now - prev.notified.at < DEBOUNCE_MS) ev = null;
   // Held back by mute or quiet hours does not count as told, or the next real one would be dropped.
-  const channels = ev ? channelsFor(ev, cfg, now) : [];
+  const channels = ev && !prev?.muted ? channelsFor(ev, cfg, now) : [];
+
+  // Tokens: remember where the transcript stood when the turn began; at Stop, add up what was logged since.
+  const starting = event === 'UserPromptSubmit' || (state === 'running' && (!prev || prev.state === 'done'));
+  let turnOffset = starting ? fileSize(input.transcript_path) : prev?.turnOffset;
+  let tokens = prev?.tokens;
+  let lastTurn = starting ? undefined : prev?.lastTurn;
+  let { cost, context, lastText, files, history, model, lastPrompt } = prev ?? {};
+  // The prompt stays on the board (this machine only); it is never put in a notification. Slash commands and
+  // hook output arrive as prompts too but say nothing about the work, so they do not replace the last real one.
+  if (!cfg.showPrompt) lastPrompt = undefined;
+  else if (event === 'UserPromptSubmit' && !/^\s*[/<]/.test(input.prompt ?? '')) lastPrompt = topicOf(input.prompt) ?? lastPrompt;
+  if (event === 'Stop' && input.transcript_path) {
+    const u = transcriptUsage(input.transcript_path, turnOffset ?? 0);
+    if (u) {
+      turnOffset = u.end;
+      lastTurn = { input: inTokens(u), output: u.output };
+      tokens = add(tokens, u);
+      model = u.model ?? model;
+      cost = (cost ?? 0) + u.cost;
+      if (u.context !== undefined) context = { tokens: u.context, window: u.context > 200000 ? 1000000 : 200000 };
+      if (u.lastText) lastText = u.lastText.replace(/\s+/g, ' ').trim().slice(0, 600);
+      files = [...new Set([...(files ?? []), ...u.files.map((f) => relativeTo(top, f))])].slice(-40);
+      history = [
+        ...(history ?? []),
+        { at: now, seconds: prev?.turnStart ? Math.round((now - prev.turnStart) / 1000) : null, input: inTokens(u), output: u.output, cost: u.cost },
+      ].slice(-15);
+      appendFileSync(
+        join(DIR, 'usage.jsonl'),
+        JSON.stringify({
+          at: now, session: id, label, path: top, seconds: prev?.turnStart ? Math.round((now - prev.turnStart) / 1000) : null,
+          model: u.model, input: u.input, output: u.output, cacheWrite: u.cacheWrite, cacheRead: u.cacheRead, messages: u.messages,
+        }) + '\n',
+      );
+    }
+  }
+
+  // Claude Code names a session a little after its first prompt, so look again until a real title turns up.
+  let topic = prev?.topic;
+  let titled = prev?.titled;
+  if (!titled && input.transcript_path && (!working || !topic)) {
+    const found = transcriptTopic(input.transcript_path);
+    if (found) ({ topic, titled } = found);
+  }
+  if (!topic && event === 'UserPromptSubmit') topic = topicOf(input.prompt);
 
   writeFileSync(
     file,
     JSON.stringify({
       session: id,
+      turnOffset,
+      tokens,
+      lastTurn,
       pid: Number(process.env.CLAUDE_PID) || prev?.pid,
       label,
+      // what the session is about, so two sessions in one folder can be told apart
+      topic,
+      titled,
+      first: prev?.first ?? now,
+      turns: (prev?.turns ?? 0) + (starting ? 1 : 0),
+      tool: working ? input.tool_name : prev?.tool,
+      hidden: prev?.hidden && state === 'done' ? true : undefined,
+      muted: prev?.muted,
+      cost,
+      context,
+      model,
+      lastPrompt,
+      lastText,
+      files,
+      history,
+      ...(event === 'Stop' || event === 'UserPromptSubmit' ? gitInfo(top) : { branch: prev?.branch, dirty: prev?.dirty }),
       path: top,
       state,
       since: prev?.state === state ? prev.since : now,
@@ -398,25 +620,90 @@ function board(now = Date.now()) {
       drop(join(DIR, name));
       continue;
     }
-    rows.push(s);
+    if (!s.hidden) rows.push(s);
   }
   const order = { waiting: 0, running: 1, done: 2 };
   return rows.sort((a, b) => order[a.state] - order[b.state] || a.since - b.since);
+}
+
+/** Hides finished sessions from the board: one by id, or every one when `session` is omitted. A session that starts working again comes back. */
+export function dismiss(session) {
+  const only = session === undefined ? null : `${String(session).replace(/[^\w-]/g, '')}.json`;
+  let names = [];
+  try {
+    names = readdirSync(DIR);
+  } catch {}
+  let n = 0;
+  for (const name of names.filter((x) => x.endsWith('.json') && (!only || x === only))) {
+    const s = readJson(join(DIR, name), null);
+    if (s?.state !== 'done' || s.hidden) continue;
+    writeFileSync(join(DIR, name), JSON.stringify({ ...s, hidden: true }));
+    n++;
+  }
+  return n;
+}
+
+/** Applies `patch` (only the keys present) to one session's record; false if there is no such session. */
+export function patchSession(session, patch) {
+  const file = join(DIR, `${String(session ?? '').replace(/[^\w-]/g, '')}.json`);
+  const s = readJson(file, null);
+  if (!s) return false;
+  writeFileSync(file, JSON.stringify({ ...s, ...patch }));
+  return true;
 }
 
 function status() {
   const now = Date.now();
   const rows = board(now);
   if (!rows.length) return console.log('no Claude Code sessions reporting yet (run: agent-notify setup)');
+  const dupes = (l) => rows.filter((r) => r.label === l).length > 1;
+  for (const r of rows) if (dupes(r.label)) r.label += ` · ${r.topic || '#' + String(r.session).slice(0, 4)}`;
   const width = Math.max(...rows.map((r) => r.label.length));
   for (const r of rows) {
-    const note = r.state === 'waiting' && r.message ? `  ${r.message}` : '';
+    const note = r.state === 'waiting' && r.message ? `  ${r.message}` : [r.model?.replace(/^claude-/, '').replace(/-\d{8}$/, ''), r.tokens && `${tokensText(r.tokens)} this session`, r.lastPrompt && `"${r.lastPrompt.slice(0, 60)}"`].filter(Boolean).map((p) => `  ${p}`).join('');
     console.log(`${r.state.padEnd(8)} ${r.label.padEnd(width)}  ${duration(now - r.since).padStart(7)}${note}`);
   }
   const n = (state) => rows.filter((r) => r.state === state).length;
   console.log(`\n${n('waiting')} waiting on you, ${n('running')} running, ${n('done')} done`);
   const until = muteUntil();
   if (until > now) console.log(`muted until ${new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+}
+
+/** `usage [--since 1d]`: tokens per project/worktree from the log of finished turns. */
+function usage(since) {
+  let cutoff = 0;
+  if (since) {
+    const m = /^(\d+)([smhd])$/.exec(since);
+    if (!m) fail('usage: agent-notify usage [--since 30m|12h|7d]');
+    cutoff = Date.now() - Number(m[1]) * { s: 1e3, m: 60e3, h: 3600e3, d: 86400e3 }[m[2]];
+  }
+  let lines = [];
+  try {
+    lines = readFileSync(join(DIR, 'usage.jsonl'), 'utf8').split('\n');
+  } catch {}
+  const by = new Map();
+  for (const line of lines) {
+    let t;
+    try {
+      t = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (t.at < cutoff) continue;
+    const row = by.get(t.label) ?? { turns: 0, seconds: 0, u: null };
+    row.turns++;
+    row.seconds += t.seconds ?? 0;
+    row.u = add(row.u, t);
+    by.set(t.label, row);
+  }
+  if (!by.size) return console.log('no finished turns recorded yet');
+  const rows = [...by].sort((a, b) => inTokens(b[1].u) + b[1].u.output - inTokens(a[1].u) - a[1].u.output);
+  const width = Math.max(...rows.map(([l]) => l.length));
+  for (const [label, r] of rows) {
+    console.log(`${label.padEnd(width)}  ${String(r.turns).padStart(4)} turns  ${duration(r.seconds * 1000).padStart(7)}  ${tokensText(r.u)}  (${compact(r.u.cacheRead)} from cache)`);
+  }
+  const total = rows.reduce((a, [, r]) => add(a, r.u), null);
+  console.log(`\n${rows.reduce((n, [, r]) => n + r.turns, 0)} turns, ${tokensText(total)}`);
 }
 
 // ---- dashboard: the same board as a page, for a pinned browser tab ----
@@ -432,6 +719,7 @@ const settingsView = () => {
     webhook: cfg.webhook ?? '',
     command: cfg.command ?? '',
     minSeconds: cfg.minSeconds,
+    showPrompt: cfg.showPrompt,
     quietHours: cfg.quietHours ?? null,
     mutedUntil: muteUntil() > Date.now() ? muteUntil() : 0,
     configPath: CONFIG,
@@ -480,6 +768,12 @@ async function dashboard({ open }) {
           if (req.url === '/api/mute') {
             setMute(String(body.duration ?? ''));
             return json(200, settingsView());
+          }
+          if (req.url === '/api/session') {
+            return json(200, { updated: patchSession(body.session, { muted: Boolean(body.muted) || undefined }) });
+          }
+          if (req.url === '/api/dismiss') {
+            return json(200, { dismissed: dismiss(body.session) });
           }
           if (req.url === '/api/test') {
             if (!CHANNEL_NAMES.includes(body.channel)) throw new Error('unknown channel');
@@ -650,18 +944,22 @@ async function main() {
     }
   } else if (cmd === 'status') {
     status();
+  } else if (cmd === 'usage') {
+    usage(rest[0] === '--since' ? rest[1] : undefined);
   } else if (cmd === 'dashboard') {
     await dashboard({ open: flags.has('--open') });
   } else if (cmd === 'setup') {
     await setup({ remove: flags.has('--remove'), ntfy: flags.has('--ntfy') });
   } else if (cmd === 'autostart') {
     autostart(rest[0]);
+  } else if (cmd === 'clear') {
+    console.log(`cleared ${dismiss()} finished session(s) from the board`);
   } else if (cmd === 'mute') {
     mute(rest[0]);
   } else if (cmd === 'test') {
     await test();
   } else {
-    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | dashboard [--open] | autostart [on|off] | mute [duration|off] | test>');
+    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | usage [--since 7d] | dashboard [--open] | autostart [on|off] | clear | mute [duration|off] | test>');
   }
 }
 
