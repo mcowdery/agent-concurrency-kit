@@ -72,6 +72,7 @@ npx agent-notify setup          # one-time: adds the hooks to Claude Code
 npx agent-notify dashboard      # a live page of every session, at http://localhost:7878
 npx agent-notify status         # the same board in the terminal
 npx agent-notify autostart on   # start the dashboard at login (Windows; `off` undoes it)
+npx agent-notify clear          # hide finished sessions from the board
 npx agent-notify mute 2h        # silence alerts for a while (30m, 1d, off)
 npx agent-notify test           # send a sample to each channel, to check it reaches you
 ```
@@ -84,14 +85,37 @@ permission prompt, a question). Not when it starts, and not for the "still waiti
 reminder Claude Code repeats after a finish. Turns shorter than 20 seconds are not announced as
 finished (you were watching).
 
+### Token usage
+
+When a turn finishes, the hook adds up the token usage Claude Code logged in the session's
+transcript during that turn and appends one line to `usage.jsonl` next to the board (project or
+worktree, duration, model, and input, output, cache-write and cache-read tokens). `status` and the
+dashboard show each session's running total, and the dashboard also shows the last turn.
+
+```
+npx agent-notify usage              # per project / worktree, all recorded turns
+npx agent-notify usage --since 7d   # or the last 30m, 12h, 7d ...
+```
+
+"In" counts uncached input plus cache writes and reads; the cache-read share is listed separately
+because it dominates long sessions. Tokens only: no dollar cost is computed. The log lives in the OS
+temp dir like the board, so it does not survive a cleanup; copy it elsewhere to keep history. Turns
+are counted from what the transcript file holds, so a turn that was cut off (Esc, closed window) is
+not recorded, and its tokens fall into the next turn.
+
 ### The dashboard
 
 `npx agent-notify dashboard` serves a page on `localhost:7878` (`--open` opens it; `AGENT_NOTIFY_PORT`
 changes the port). Pin the tab.
 
 - **Every session at a glance**, with a status icon (needs you, running, finished), how long it has
-  been in that state, Claude's message when it is waiting on you, and a link that opens the folder
-  in VS Code. The tab title shows how many are waiting on you, and its icon changes colour.
+  been in that state, Claude's message when it is waiting on you. Two sessions in one folder are told
+  apart by their title. Click a row to open its detail: title, what Claude last said, context
+  window used, tokens, an estimated cost at API list prices, recent turns, files changed, git branch
+  and uncommitted count, folder and session id, with buttons to copy `claude --resume <id>` and to
+  mute that one session's alerts (it stays on the board); the folder button on the row opens it in VS Code, and the cross dismisses a
+  finished session (a dismissed one comes back if it starts working again; "Clear finished" does
+  them all). The tab title shows how many are waiting on you, and its icon changes colour.
 - **Sorted the way you need:** newest activity first by default. Icon buttons sort by last
   activity, status, name, or time in state; click the active one (or the arrow) to reverse. Switch
   between a compact list and cards. Both choices are remembered by the browser.
@@ -111,6 +135,19 @@ The dashboard only runs while its command does. On Windows, `npx agent-notify au
 shortcut in your Startup folder so it comes back at every login, with no console window;
 `autostart off` removes it. Elsewhere, start `node notify.mjs dashboard` from your login items or a
 systemd user service.
+
+On Windows, `npx agent-notify hotkey on` adds a Start Menu shortcut with a global hotkey (default
+Ctrl+Alt+B; `--key Ctrl+Alt+F9` to change it, `hotkey off` to remove it). The hotkey opens the board
+as a bare app window in Edge or Chrome, with no tabs or address bar; pressing it again focuses that
+window. It needs the dashboard running, so pair it with `autostart on`. Windows only allows
+Ctrl+Alt or Ctrl+Shift plus one key for these.
+
+For a real popup instead of a browser window, there is an optional tray app (Electron, so it is the
+one part of the kit with a dependency). Install it once with `npm install --prefix tray`, then
+`npx agent-notify tray` puts an icon in the tray and binds Scroll Lock (`AGENT_NOTIFY_HOTKEY`, e.g. `F13`, to
+change it) to show and hide the board as a frameless window that hides on Esc or when it loses
+focus. It starts the dashboard itself if it isn't running, and its tray menu has "Start at login".
+The two hotkeys are independent, so you can use both.
 
 ### Channels
 
@@ -133,6 +170,15 @@ of `notify.mjs`), and the settings page edits it for you. ntfy and webhook turn 
 set `"channels": [...]` to choose explicitly. Messages carry only the project name and Claude Code's
 own status text, never code or output. For ntfy.sh the topic name is the only secret, which is why
 `setup --ntfy` generates a random one; or point `ntfy.server` at one you host yourself.
+
+### Last prompt and model
+
+Each session on the board and dashboard shows its last prompt (first ~120 characters; slash
+commands such as `/model` don't replace it) and, once a turn has finished, the model that answered
+it, which follows `/model` switches. `status` prints both too. The prompt is kept only in the
+board file on this machine and is **never** put in a toast, push, webhook or command, so the promise
+above holds. If prompts may hold something private, set `"showPrompt": false` (or untick it on the
+settings page, or `AGENT_NOTIFY_SHOW_PROMPT=false`) and it isn't stored at all.
 
 ### Quiet hours and mute
 

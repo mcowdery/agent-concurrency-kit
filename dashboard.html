@@ -79,12 +79,29 @@
   @keyframes pulse { 50% { opacity: .35; } }
   @media (prefers-reduced-motion: reduce) { .running .state .ic { animation: none; } }
   .label { font-weight: 600; font-size: 16px; overflow-wrap: anywhere; }
+  .topic { font-weight: 400; color: var(--muted); }
   .age { margin-left: auto; color: var(--muted); font: 13px/1 var(--mono); white-space: nowrap; }
   .message { overflow-wrap: anywhere; }
   .message:empty { display: none; }
-  .actions { display: flex; align-items: center; }
-  .actions a { display: inline-flex; color: var(--muted); }
-  .actions a:hover { color: var(--ink); }
+  li.sess { cursor: pointer; }
+  li.sess:hover { background: var(--raised); }
+  li.sess:focus-visible { outline: 2px solid var(--running); outline-offset: -2px; }
+  .actions { display: flex; align-items: center; gap: 2px; }
+  .sm { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; color: var(--muted); background: none; border: 0; cursor: pointer; }
+  .sm:hover { color: var(--ink); background: var(--line); }
+  .sm .ic { width: 16px; height: 16px; }
+  .chev { width: 14px; height: 14px; color: var(--muted); transition: transform .12s; }
+  li.open .chev { transform: rotate(90deg); }
+  .detail { cursor: default; padding: 8px 0 6px 24px; font-size: 14px; }
+  .detail dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; }
+  .detail dt { color: var(--muted); }
+  .detail dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
+  .detail .mono { font: 13px var(--mono); }
+  .detail .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .meter { display: inline-block; vertical-align: middle; width: 120px; height: 6px; margin-left: 10px; background: var(--line); }
+  .meter i { display: block; height: 100%; background: var(--running); }
+  .meter.hot i { background: var(--waiting); }
+  .muted-mark { color: var(--muted); margin-left: 6px; vertical-align: -3px; }
 
   /* list layout: one tight line per session, columns lined up */
   ul.rows { gap: 0; border-top: 1px solid var(--line); }
@@ -93,13 +110,18 @@
   ul.rows li.running { border-left-color: var(--running); }
   ul.rows li.done { border-left-color: var(--done); }
   ul.rows .top { display: contents; }
+  ul.rows li { flex-wrap: wrap; }
+  ul.rows .top > .chev { order: -1; }
   ul.rows .top > .state { order: 0; }
-  ul.rows .top > .label { order: 1; flex: 0 0 240px; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  ul.rows .message, ul.rows .message:empty { order: 2; display: block; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul.rows .actions { order: 3; flex: none; min-width: 54px; justify-content: flex-end; }
+  ul.rows .detail { order: 5; flex: 1 0 100%; }
+  /* the name takes whatever the message leaves, so a long title is readable; a waiting row shares the line with its message */
+  ul.rows .top > .label { order: 1; flex: 1 1 240px; min-width: 0; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul.rows .message { order: 2; display: block; flex: 2 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul.rows .message:empty { display: none; }
   ul.rows li.waiting .message { white-space: normal; overflow-wrap: anywhere; }
-  ul.rows .actions { order: 3; flex: none; width: 18px; }
   ul.rows .top > .age { order: 4; margin-left: 0; flex: 0 0 76px; text-align: right; }
-  @media (max-width: 640px) { ul.rows .top > .label { flex-basis: 130px; } ul.rows .actions { display: none; } }
+  @media (max-width: 640px) { ul.rows .top > .label { flex-basis: 130px; } }
 
   .empty { display: grid; justify-items: center; gap: 10px; color: var(--muted); padding: 40px 0; text-align: center; }
   .empty .ic { width: 28px; height: 28px; }
@@ -148,9 +170,12 @@
   <symbol id="i-activity" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
   <symbol id="i-tick" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
-  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></symbol>
   <symbol id="i-refresh" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></symbol>
   <symbol id="i-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
 </svg>
 <main>
@@ -178,6 +203,7 @@
       <button id="sort-dir" class="ib" type="button" title="Reverse order" aria-label="Reverse order"><svg class="ic"><use id="dir-use" href="#i-arrow-down"/></svg></button>
       <span id="sort-note" class="note"></span>
       <span class="spacer"></span>
+      <button id="clear" class="btn" type="button" hidden title="Remove every finished session from this list"><svg class="ic"><use href="#i-x"/></svg>Clear finished</button>
       <div class="group" role="group" aria-label="Layout">
         <button id="lay-rows" class="ib" type="button" aria-pressed="true" title="List" aria-label="List"><svg class="ic"><use href="#i-list"/></svg></button>
         <button id="lay-cards" class="ib" type="button" aria-pressed="false" title="Cards" aria-label="Cards"><svg class="ic"><use href="#i-grid"/></svg></button>
@@ -185,7 +211,6 @@
     </div>
     <ul id="list" aria-live="polite"></ul>
     <div id="empty" class="empty" hidden><svg class="ic"><use href="#i-inbox"/></svg><span>No Claude Code sessions yet. Start one and it shows up here.</span></div>
-    <footer>Pin this tab. It updates every two seconds and puts the number of sessions waiting on you in the tab title.</footer>
   </section>
 
   <section id="view-settings" hidden>
@@ -225,6 +250,10 @@
         <div class="chan">
           <label class="field">Skip "finished" for turns shorter than (seconds)<input type="number" id="min-seconds" min="0" step="1"></label>
           <div class="desc">You were probably watching. Alerts for "needs you" are never skipped by this.</div>
+        </div>
+        <div class="chan">
+          <div class="head"><label><input type="checkbox" id="show-prompt"> Show each session's last prompt on this page</label></div>
+          <div class="desc">Kept on this machine only and never put in a notification. Turn off if prompts may hold anything private.</div>
         </div>
         <div class="chan">
           <div class="head"><label><input type="checkbox" id="qh-on"> Quiet hours</label></div>
@@ -421,6 +450,8 @@
     if (data.mutedUntil) $('banner-text').textContent = 'Alerts muted until ' + new Date(data.mutedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '. This page keeps updating.';
 
     $('empty').hidden = rows.length > 0;
+    const sameLabel = new Map();
+    for (const r of rows) sameLabel.set(r.label, (sameLabel.get(r.label) || 0) + 1);
     list.replaceChildren(...rows.map((s) => {
       const li = document.createElement('li');
       li.className = s.state;
@@ -436,32 +467,74 @@
       label.className = 'label';
       label.textContent = s.label;
       label.title = s.label;
+      if (sameLabel.get(s.label) > 1) {
+        // Same folder as another session: say which one this is.
+        const hint = s.topic || '#' + String(s.session).slice(0, 4);
+        const t = document.createElement('span');
+        t.className = 'topic';
+        t.textContent = ' · ' + hint;
+        label.append(t);
+        label.title = s.label + ' · ' + hint + ' (' + s.session + ')';
+      }
+      if (s.muted) {
+        const mark = icon('bell-off', 14);
+        mark.classList.add('muted-mark');
+        label.append(mark);
+      }
       const ageEl = document.createElement('span');
       ageEl.className = 'age';
       ageEl.dataset.since = s.since;
       ageEl.textContent = age(data.now - s.since);
-      top.append(state, label, ageEl);
+      const chev = icon('chevron');
+      chev.classList.add('chev');
+      top.append(chev, state, label, ageEl);
       li.append(top);
       const m = document.createElement('div');
       m.className = 'message';
       if (s.state === 'waiting' && s.message) {
         m.textContent = s.message;
         m.title = s.message;
+      } else if (s.lastPrompt) {
+        m.textContent = s.lastPrompt;
+        m.title = 'Last prompt: ' + s.lastPrompt;
       }
       li.append(m);
+
       const actions = document.createElement('div');
       actions.className = 'actions';
       if (s.path) {
         const a = document.createElement('a');
+        a.className = 'sm';
         a.href = 'vscode://file/' + encodeURI(s.path.split('\\').join('/'));
         a.title = 'Open this folder in VS Code';
         a.setAttribute('aria-label', 'Open ' + s.label + ' in VS Code');
         a.append(icon('folder'));
         actions.append(a);
       }
+      if (s.state === 'done') {
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'sm';
+        x.dataset.dismiss = s.session;
+        x.title = 'Dismiss this finished session';
+        x.setAttribute('aria-label', 'Dismiss ' + s.label);
+        x.append(icon('x'));
+        actions.append(x);
+      }
       li.append(actions);
+
+      li.classList.add('sess');
+      li.tabIndex = 0;
+      li.dataset.session = s.session;
+      const isOpen = expanded.has(s.session);
+      li.setAttribute('aria-expanded', String(isOpen));
+      if (isOpen) {
+        li.classList.add('open');
+        li.append(detailOf(s, data.now));
+      }
       return li;
     }));
+    $('clear').hidden = !rows.some((r) => r.state === 'done');
 
     for (const s of rows) {
       const at = s.notified ? s.notified.at : 0;
@@ -471,11 +544,137 @@
     primed = true;
   }
 
+  // ---- detail view ----
+
+  const expanded = new Set();   // sessions whose detail is open; kept here because rows are rebuilt on every poll
+  const k = (n) => n < 1000 ? String(n) : n < 1e6 ? (n / 1e3).toFixed(n < 1e4 ? 1 : 0) + 'k' : (n / 1e6).toFixed(1) + 'M';
+  const inn = (u) => u.input + (u.cacheWrite || 0) + (u.cacheRead || 0);
+
+  const money = (n) => '$' + (n < 0.01 ? n.toFixed(3) : n < 100 ? n.toFixed(2) : n.toFixed(0));
+  let copied = { session: null, at: 0 };   // which "copy resume command" button was just pressed
+
+  function detailOf(s, now) {
+    const box = document.createElement('div');
+    box.className = 'detail';
+    const dl = document.createElement('dl');
+    box.append(dl);
+    const add = (name, value, cls) => {
+      if (value === undefined || value === null || value === '') return null;
+      const dt = document.createElement('dt');
+      dt.textContent = name;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      if (cls) dd.className = cls;
+      dl.append(dt, dd);
+      return dd;
+    };
+    add('Title', s.topic);
+    add('Waiting for', s.state === 'waiting' ? s.message : '');
+    add('Last prompt', s.lastPrompt);
+    add('Last said', s.lastText);
+    add('Model', s.model && s.model.replace(/^claude-/, '').replace(/-\d{8}$/, ''));
+    if (s.context) {
+      const pct = Math.min(100, Math.round(100 * s.context.tokens / s.context.window));
+      const dd = add('Context', k(s.context.tokens) + ' of ' + k(s.context.window) + ' (' + pct + '%)');
+      const bar = document.createElement('span');
+      bar.className = 'meter' + (pct >= 80 ? ' hot' : '');
+      bar.title = 'The window is assumed to be 200k unless the session has gone past it';
+      const fill = document.createElement('i');
+      fill.style.width = pct + '%';
+      bar.append(fill);
+      dd.append(bar);
+    }
+    add('Last turn', s.lastTurn && k(s.lastTurn.input) + ' in / ' + k(s.lastTurn.output) + ' out');
+    add('This session', s.tokens && k(inn(s.tokens)) + ' in / ' + k(s.tokens.output) + ' out (input includes cache reads and writes)');
+    add('Cost', s.cost > 0 ? '≈ ' + money(s.cost) + ' at API list prices (an estimate; a subscription is not billed per token)' : '');
+    add('Turns', s.turns);
+    if (s.history && s.history.length > 1) {
+      add('Recent turns', s.history.slice().reverse().map((t) =>
+        (t.seconds === null ? '?' : age(t.seconds * 1000)).padEnd(8) + k(t.input) + ' in / ' + k(t.output) + ' out' + (t.cost ? '  ' + money(t.cost) : '')).join('\n'), 'mono');
+    }
+    add('Last tool', s.tool);
+    if (s.files && s.files.length) {
+      add('Files changed', s.files.slice(-12).reverse().join('\n') + (s.files.length > 12 ? '\n+ ' + (s.files.length - 12) + ' more' : ''), 'mono');
+    }
+    add('Branch', s.branch && s.branch + (s.dirty ? ' · ' + s.dirty + ' uncommitted' : ' · clean'));
+    add('In this state', age(now - s.since));
+    add('Started', s.first && new Date(s.first).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }));
+    add('Folder', s.path, 'mono');
+    add('Session', s.session, 'mono');
+
+    const btns = document.createElement('div');
+    btns.className = 'btns';
+    const btn = (act, iconName, text) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn';
+      b.dataset.act = act;
+      b.dataset.session = s.session;
+      b.append(icon(iconName), text);
+      btns.append(b);
+    };
+    btn('copy', 'copy', copied.session === s.session && Date.now() - copied.at < 1500 ? 'Copied' : 'Copy resume command');
+    btn('mute', s.muted ? 'bell' : 'bell-off', s.muted ? 'Unmute this session' : 'Mute this session');
+    box.append(btns);
+    return box;
+  }
+
+  function redraw() {
+    if (!latest) return;
+    const keep = fetchedAt;   // redrawing is not a new poll: leave the age clock alone
+    render(latest);
+    fetchedAt = keep;
+  }
+
+  function toggle(li) {
+    const id = li.dataset.session;
+    if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+    redraw();
+  }
+
+  // Rows are rebuilt on every poll, so listen on the list: a listener on a row would miss any click
+  // that straddles a rebuild.
+  list.addEventListener('click', async (e) => {
+    const x = e.target.closest('[data-dismiss]');
+    if (x) {
+      try { await api('/api/dismiss', { session: x.dataset.dismiss }); } catch {}
+      return poll();
+    }
+    const act = e.target.closest('[data-act]');
+    if (act) {
+      const id = act.dataset.session;
+      if (act.dataset.act === 'copy') {
+        try { await navigator.clipboard.writeText('claude --resume ' + id); } catch { return; }
+        copied = { session: id, at: Date.now() };
+        redraw();
+        setTimeout(redraw, 1600);
+      } else {
+        const s = latest && latest.sessions.find((r) => r.session === id);
+        try { await api('/api/session', { session: id, muted: !(s && s.muted) }); } catch {}
+        poll();
+      }
+      return;
+    }
+    if (e.target.closest('a, .detail')) return;   // the VS Code link, and text being read or copied in the detail
+    const li = e.target.closest('li[data-session]');
+    if (li && !String(getSelection())) toggle(li);
+  });
+  list.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('li[data-session]')) { e.preventDefault(); toggle(e.target); }
+  });
+  $('clear').addEventListener('click', async () => {
+    try { await api('/api/dismiss', {}); } catch {}
+    poll();
+  });
+
   async function poll() {
     try {
       const res = await fetch('/api/status', { cache: 'no-store' });
       if (!res.ok) throw new Error(res.status);
-      render(await res.json());
+      const data = await res.json();
+      const sel = getSelection();
+      if (String(sel) && list.contains(sel.anchorNode)) latest = data;   // leave a text selection alone; the next poll catches up
+      else render(data);
     } catch {
       $('summary').textContent = 'dashboard stopped: restart it with agent-notify dashboard';
       document.title = 'stopped \u00b7 agent-notify';
@@ -540,6 +739,7 @@
     $('webhook').value = c.webhook;
     $('command').value = c.command;
     $('min-seconds').value = c.minSeconds;
+    $('show-prompt').checked = c.showPrompt;
     const q = c.quietHours;
     $('qh-on').checked = !!q;
     $('qh-start').value = q ? q.start.padStart(5, '0') : '22:00';
@@ -566,6 +766,7 @@
       webhook: $('webhook').value,
       command: $('command').value,
       minSeconds: $('min-seconds').value,
+      showPrompt: $('show-prompt').checked,
       quietHours: on ? {
         start: $('qh-start').value,
         end: $('qh-end').value,
