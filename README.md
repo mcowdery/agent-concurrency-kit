@@ -136,6 +136,19 @@ shortcut in your Startup folder so it comes back at every login, with no console
 `autostart off` removes it. Elsewhere, start `node notify.mjs dashboard` from your login items or a
 systemd user service.
 
+On Windows, `npx agent-notify hotkey on` adds a Start Menu shortcut with a global hotkey (default
+Ctrl+Alt+B; `--key Ctrl+Alt+F9` to change it, `hotkey off` to remove it). The hotkey opens the board
+as a bare app window in Edge or Chrome, with no tabs or address bar; pressing it again focuses that
+window. It needs the dashboard running, so pair it with `autostart on`. Windows only allows
+Ctrl+Alt or Ctrl+Shift plus one key for these.
+
+For a real popup instead of a browser window, there is an optional tray app (Electron, so it is the
+one part of the kit with a dependency). Install it once with `npm install --prefix tray`, then
+`npx agent-notify tray` puts an icon in the tray and binds Scroll Lock (`AGENT_NOTIFY_HOTKEY`, e.g. `F13`, to
+change it) to show and hide the board as a frameless window that hides on Esc or when it loses
+focus. It starts the dashboard itself if it isn't running, and its tray menu has "Start at login".
+The two hotkeys are independent, so you can use both.
+
 ### Channels
 
 | Channel | What it is | Setup |

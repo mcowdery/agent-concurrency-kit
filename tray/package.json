@@ -1,0 +1,13 @@
+{
+  "name": "agent-notify-tray",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A tray icon and global hotkey that pops up the agent-notify board. Optional; the rest of the kit needs no dependencies.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

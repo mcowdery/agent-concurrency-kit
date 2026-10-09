@@ -534,3 +534,14 @@ test('autostart adds and removes a login shortcut', { skip: process.platform !==
   assert.equal(existsSync(join(startup, 'agent-notify dashboard.lnk')), false);
   assert.notEqual(s.cli(['autostart', 'sideways']).status, 0);
 });
+
+test('hotkey adds and removes a Start Menu shortcut and rejects bad keys', { skip: process.platform !== 'win32' }, () => {
+  const menu = mkdtempSync(join(tmpdir(), 'ack-menu-'));
+  const s = sandbox({ AGENT_NOTIFY_MENU_DIR: menu });
+  assert.match(s.cli(['hotkey']).stdout, /no board hotkey/);
+  assert.match(s.cli(['hotkey', 'on', '--key', 'Ctrl+Alt+F9']).stdout, /hotkey/);
+  assert.ok(existsSync(join(menu, 'agent-notify board.lnk')));
+  assert.match(s.cli(['hotkey', 'off']).stdout, /no board hotkey/);
+  assert.notEqual(s.cli(['hotkey', 'on', '--key', 'Alt+B']).status, 0);
+  assert.notEqual(s.cli(['hotkey', 'sideways']).status, 0);
+});

@@ -11,6 +11,8 @@
 //   npx agent-notify dashboard [--open]         the same board as a live page on http://localhost:7878,
 //                                                with clickable browser notifications; pin the tab
 //   npx agent-notify autostart [on|off]          start the dashboard at login (Windows)
+//   npx agent-notify hotkey [on|off] [--key K]   open the board as an app window from anywhere (Windows, default Ctrl+Alt+B)
+//   npx agent-notify tray                        tray icon + global hotkey (Scroll Lock) that shows and hides the board as a popup
 //   npx agent-notify test                        send a sample to each configured channel
 //   npx agent-notify clear                      hide finished sessions from the board (they return if they start working again)
 //   npx agent-notify mute <2h|30m|off>           silence every channel for a while (the board
@@ -880,32 +882,85 @@ $sh.TargetPath = $env:AGENT_NOTIFY_TARGET
 $sh.Arguments = $env:AGENT_NOTIFY_ARGS
 $sh.WorkingDirectory = $env:AGENT_NOTIFY_CWD
 $sh.WindowStyle = 7
-$sh.Description = 'agent-notify dashboard (http://localhost:7878)'
+$sh.Description = $env:AGENT_NOTIFY_DESC
+if ($env:AGENT_NOTIFY_HOTKEY) { $sh.Hotkey = $env:AGENT_NOTIFY_HOTKEY }
 $sh.Save()
 `;
+
+function makeShortcut(lnk, target, args, extra = {}) {
+  mkdirSync(dirname(lnk), { recursive: true });
+  const env = {
+    ...process.env,
+    AGENT_NOTIFY_LNK: lnk,
+    AGENT_NOTIFY_TARGET: target,
+    AGENT_NOTIFY_ARGS: args,
+    AGENT_NOTIFY_CWD: dirname(SELF),
+    AGENT_NOTIFY_DESC: 'agent-notify dashboard (http://localhost:7878)',
+    AGENT_NOTIFY_HOTKEY: '',
+    ...extra,
+  };
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(STARTUP_PS, 'utf16le').toString('base64')], { env, stdio: 'ignore', timeout: 30000 });
+}
 
 function autostart(arg) {
   if (process.platform !== 'win32') {
     fail('autostart is Windows only. Elsewhere, start `node ' + SELF + ' dashboard` from your login items or a systemd user service.');
   }
   if (arg === 'on') {
-    mkdirSync(STARTUP_DIR, { recursive: true });
-    const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
-    const env = {
-      ...process.env,
-      AGENT_NOTIFY_LNK: STARTUP_LNK,
-      // conhost --headless runs node with no console window at all
-      AGENT_NOTIFY_TARGET: join(system, 'conhost.exe'),
-      AGENT_NOTIFY_ARGS: `--headless "${process.execPath}" "${SELF}" dashboard`,
-      AGENT_NOTIFY_CWD: dirname(SELF),
-    };
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(STARTUP_PS, 'utf16le').toString('base64')], { env, stdio: 'ignore', timeout: 30000 });
+    const system = join(process.env.SystemRoot ?? 'C:\\Windows','System32');
+    // conhost --headless runs node with no console window at all
+    makeShortcut(STARTUP_LNK, join(system, 'conhost.exe'), `--headless "${process.execPath}" "${SELF}" dashboard`);
   } else if (arg === 'off') {
     drop(STARTUP_LNK);
   } else if (arg) {
     fail('usage: agent-notify autostart [on|off]');
   }
   console.log(existsSync(STARTUP_LNK) ? `the dashboard starts at login (${STARTUP_LNK})` : 'the dashboard does not start at login');
+}
+
+// ---- a global hotkey that opens the dashboard as an app window (Windows: a Start Menu shortcut with a Hotkey) ----
+
+const MENU_DIR = process.env.AGENT_NOTIFY_MENU_DIR ?? join(process.env.APPDATA ?? homedir(), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+const HOTKEY_LNK = join(MENU_DIR, 'agent-notify board.lnk');
+const DEFAULT_HOTKEY = 'Ctrl+Alt+B';
+
+/** The first installed Chromium browser, which can open a page as a bare app window (no tabs or address bar). */
+function appBrowser() {
+  const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean);
+  const rel = [['Microsoft', 'Edge', 'Application', 'msedge.exe'], ['Google', 'Chrome', 'Application', 'chrome.exe']];
+  for (const r of rel) for (const root of roots) if (existsSync(join(root, ...r))) return join(root, ...r);
+  return null;
+}
+
+function hotkey(arg, key = DEFAULT_HOTKEY) {
+  if (process.platform !== 'win32') fail('hotkey is Windows only.');
+  if (arg === 'on') {
+    // Windows only honours shortcut hotkeys that start with Ctrl+Alt (or Ctrl+Shift) plus one key.
+    if (!/^(ctrl\+alt|ctrl\+shift|ctrl\+alt\+shift)\+([a-z0-9]|f([1-9]|1[0-2]))$/i.test(key)) {
+      fail('--key must be Ctrl+Alt+<key> or Ctrl+Shift+<key>, like Ctrl+Alt+B or Ctrl+Alt+F9');
+    }
+    const browser = appBrowser();
+    if (!browser) fail('no Edge or Chrome found; the hotkey opens the board as an app window with one of them');
+    const url = `http://localhost:${process.env.AGENT_NOTIFY_PORT ?? 7878}`;
+    makeShortcut(HOTKEY_LNK, browser, `--app=${url}`, { AGENT_NOTIFY_HOTKEY: key.toUpperCase(), AGENT_NOTIFY_DESC: `agent-notify board (${key})` });
+  } else if (arg === 'off') {
+    drop(HOTKEY_LNK);
+  } else if (arg) {
+    fail('usage: agent-notify hotkey [on|off] [--key Ctrl+Alt+B]');
+  }
+  console.log(existsSync(HOTKEY_LNK) ? `the board opens with its hotkey (${HOTKEY_LNK}); it needs the dashboard running: agent-notify autostart on` : 'no board hotkey');
+}
+
+// ---- tray: a tray icon and global hotkey that pop the board up (Electron, installed on demand in tray/) ----
+
+function tray() {
+  const dir = join(dirname(SELF), 'tray');
+  const exe = join(dir, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
+  if (!existsSync(exe)) fail(`the tray needs Electron: run  npm install --prefix "${dir}"  first`);
+  // editors built on Electron export ELECTRON_RUN_AS_NODE, which would make this run as plain Node
+  const { ELECTRON_RUN_AS_NODE, ...env } = process.env;
+  spawn(exe, [dir], { env, stdio: 'ignore', detached: true, windowsHide: true }).on('error', () => {}).unref();
+  console.log(`agent-notify tray started: press ${process.env.AGENT_NOTIFY_HOTKEY ?? 'ScrollLock'} to show or hide the board; right-click the tray icon for "Start at login" and Quit`);
 }
 
 function mute(arg) {
@@ -952,6 +1007,11 @@ async function main() {
     await setup({ remove: flags.has('--remove'), ntfy: flags.has('--ntfy') });
   } else if (cmd === 'autostart') {
     autostart(rest[0]);
+  } else if (cmd === 'hotkey') {
+    const at = rest.indexOf('--key');
+    hotkey(rest[0] === '--key' ? undefined : rest[0], at >= 0 ? rest[at + 1] : undefined);
+  } else if (cmd === 'tray') {
+    tray();
   } else if (cmd === 'clear') {
     console.log(`cleared ${dismiss()} finished session(s) from the board`);
   } else if (cmd === 'mute') {
@@ -959,7 +1019,7 @@ async function main() {
   } else if (cmd === 'test') {
     await test();
   } else {
-    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | usage [--since 7d] | dashboard [--open] | autostart [on|off] | clear | mute [duration|off] | test>');
+    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | usage [--since 7d] | dashboard [--open] | autostart [on|off] | hotkey [on|off] [--key Ctrl+Alt+B] | tray | clear | mute [duration|off] | test>');
   }
 }
 
