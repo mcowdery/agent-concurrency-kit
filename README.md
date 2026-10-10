@@ -74,6 +74,7 @@ npx agent-notify status         # the same board in the terminal
 npx agent-notify autostart on   # start the dashboard at login (Windows; `off` undoes it)
 npx agent-notify clear          # hide finished sessions from the board
 npx agent-notify mute 2h        # silence alerts for a while (30m, 1d, off)
+npx agent-notify resources     # the state of each configured resource (a GPU pod, a dev server); see Resources below
 npx agent-notify test           # send a sample to each channel, to check it reaches you
 ```
 
@@ -148,6 +149,56 @@ one part of the kit with a dependency). Install it once with `npm install --pref
 change it) to show and hide the board as a frameless window that hides on Esc or when it loses
 focus. It starts the dashboard itself if it isn't running, and its tray menu has "Start at login".
 The two hotkeys are independent, so you can use both.
+
+### Resources: a tab for things you start and stop
+
+Some things your agents lean on cost money or contention while they run: a rented GPU machine, a
+dev server, a database container. The dashboard's **Resources** tab (the server icon) shows each one's
+state and gives it Start and Stop buttons, so you can see what is up, what it is costing, and shut it
+down without finding the right terminal. A dot on the tab's icon says something is running.
+
+The kit knows nothing about any particular resource. You list them in `~/.agent-notify.json`, each with a
+command that prints its status and a command per button:
+
+```json
+{
+  "resources": [{
+    "id": "pod",
+    "name": "GPU pod",
+    "cwd": "C:/code/my-project",
+    "poll": 10,
+    "status": "node scripts/pod.mjs status --json",
+    "actions": [
+      { "id": "start", "label": "Start", "command": "node scripts/pod.mjs start" },
+      { "id": "stop", "label": "Stop", "command": "node scripts/pod.mjs stop", "confirm": "Stop the pod? Anything running on it is cut off." }
+    ]
+  }]
+}
+```
+
+`status` runs from `cwd` and prints one line of JSON (anything printed before it is ignored):
+
+```json
+{ "state": "running", "title": "GPU pod", "note": "Stops itself after 45 idle minutes.",
+  "fields": [{ "label": "Cost", "value": "$0.27/hr, about $0.05 this run" }],
+  "actions": ["stop"] }
+```
+
+- `state` is `running`, `starting`, `stopped` or `error`; anything else shows as unknown.
+- `fields` are label and value rows (a value may span lines). `note` is one sentence under the title.
+- `actions` is optional: the ids of the buttons that make sense right now, the rest are greyed out. Leave it
+  out and every button is available. While an action is running, all of them are disabled and its output
+  is shown as "Progress".
+- A status command that fails or prints no JSON shows as an error with its last line; it never hangs the
+  page (25 seconds at most). The result is cached for `poll` seconds (default 10, at least 3), however many
+  tabs are open.
+
+A button runs the command written in the config file, in the background, and its output goes to a log the
+page shows. The page only ever sends a resource id and an action id, never command text, and only from its
+own page (the same rule as the settings), so another site cannot press them. `confirm`, when present,
+asks first. `agent-notify resources` prints every resource and its state in the terminal, and
+`agent-notify resources pod stop` runs an action there and waits for it.
+
 
 ### Channels
 

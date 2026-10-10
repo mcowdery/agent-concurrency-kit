@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { applySettings, costOf, inQuietHours, labelFor, relativeTo, topicOf } from '../notify.mjs';
+import { applySettings, costOf, inQuietHours, labelFor, normalizeResources, parseStatus, relativeTo, topicOf } from '../notify.mjs';
 
 const RECORDER = fileURLToPath(new URL('./fixtures/record.mjs', import.meta.url)).split('\\').join('/');
 const SCRIPT = fileURLToPath(new URL('../notify.mjs', import.meta.url));
@@ -544,4 +544,153 @@ test('hotkey adds and removes a Start Menu shortcut and rejects bad keys', { ski
   assert.match(s.cli(['hotkey', 'off']).stdout, /no board hotkey/);
   assert.notEqual(s.cli(['hotkey', 'on', '--key', 'Alt+B']).status, 0);
   assert.notEqual(s.cli(['hotkey', 'sideways']).status, 0);
+});
+
+// ---- resources ----
+
+const FAKE = fileURLToPath(new URL('./fixtures/fakeres.mjs', import.meta.url)).split('\\').join('/');
+
+// A sandbox whose config lists one fake resource whose state lives in a file.
+function resourceSandbox(extra = {}) {
+  const s = sandbox();
+  const stateFile = join(s.dir, 'box-state').split('\\').join('/');
+  const box = {
+    id: 'box',
+    name: 'Test box',
+    poll: 3,
+    status: `node "${FAKE}" status "${stateFile}"`,
+    actions: [
+      { id: 'start', label: 'Start', command: `node "${FAKE}" start "${stateFile}"` },
+      { id: 'stop', label: 'Stop', command: `node "${FAKE}" stop "${stateFile}"`, confirm: 'Stop it?' },
+    ],
+    ...extra,
+  };
+  writeFileSync(join(s.dir, 'config.json'), JSON.stringify({ channels: ['command'], command: 'x', resources: [box] }));
+  return { ...s, stateFile, box };
+}
+
+const waitFor = async (check, what, ms = 8000) => {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await check();
+    if (v) return v;
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+};
+
+test('resource config keeps good entries and says why it skipped the others', () => {
+  const ok = { id: 'pod', name: 'GPU pod', status: 'echo {}', actions: [{ id: 'start', command: 'x' }] };
+  const { resources, problems } = normalizeResources([
+    ok,
+    { ...ok },
+    { id: 'bad id!', status: 'x' },
+    { id: 'nostatus' },
+    { id: 'twoacts', status: 'x', actions: [{ id: 'a', command: 'x' }, { id: 'a', command: 'y' }, { id: 'b' }, { id: 'c', command: 'z', label: 'Go', confirm: 'Sure?' }] },
+    'nope',
+  ]);
+  assert.deepEqual(resources.map((r) => r.id), ['pod', 'twoacts']);
+  assert.equal(resources[0].actions[0].label, 'start');
+  assert.deepEqual(resources[1].actions.map((a) => a.id), ['a', 'c']);
+  assert.equal(resources[1].actions[1].confirm, 'Sure?');
+  assert.equal(resources[0].poll, 10);
+  assert.equal(problems.length, 6);
+  assert.deepEqual(normalizeResources(undefined), { resources: [], problems: [] });
+});
+
+test('a status answer is the last line of JSON; anything else is unknown', () => {
+  const st = parseStatus('warming up\n{"state":"running","fields":[{"label":"a","value":1}],"actions":["stop"]}\n');
+  assert.equal(st.state, 'running');
+  assert.deepEqual(st.fields, [{ label: 'a', value: '1' }]);
+  assert.deepEqual(st.actions, ['stop']);
+  assert.equal(parseStatus('{"state":"on fire"}').state, 'unknown');
+  assert.equal(parseStatus('no json here').state, 'unknown');
+  assert.equal(parseStatus('{broken').state, 'unknown');
+});
+
+test('the dashboard shows a resource, runs only its configured actions, and refuses everything else', async () => {
+  const s = resourceSandbox();
+  const { url, stop } = await startDashboard(s);
+  try {
+    const view = async () => (await (await fetch(`${url}/api/resources`)).json()).resources[0];
+    const first = await view();
+    assert.equal(first.state, 'stopped');
+    assert.equal(first.title, 'Fake box');
+    assert.deepEqual(first.fields, [{ label: 'Cost', value: '$0.27/hr' }]);
+    assert.deepEqual(first.actions.map((a) => [a.id, a.enabled]), [['start', true], ['stop', false]]);
+    assert.equal(first.actions[1].confirm, 'Stop it?');
+
+    // a write must come from the dashboard's own page
+    assert.equal((await fetch(`${url}/api/resource`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'box', action: 'start' }) })).status, 403);
+    // only ids from the config: no resource, no action, no command text, nothing that is not available now
+    const refused = async (body) => {
+      const res = await post(url, '/api/resource', body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+      return (await res.json()).error;
+    };
+    assert.match(await refused({ id: 'nope', action: 'start' }), /unknown resource/);
+    assert.match(await refused({ id: 'box', action: 'rm -rf /' }), /unknown action/);
+    assert.match(await refused({ id: 'box', action: 'stop' }), /not available/);
+    assert.equal(existsSync(s.stateFile), false);
+
+    const started = await (await post(url, '/api/resource', { id: 'box', action: 'start' })).json();
+    assert.equal(started.state, 'working');
+    assert.equal(started.busy.label, 'Start');
+    assert.ok(started.actions.every((a) => !a.enabled));
+    assert.match(await refused({ id: 'box', action: 'start' }), /not available/);
+
+    const running = await waitFor(async () => { const v = await view(); return v.state === 'running' && v; }, 'the box to be running');
+    assert.deepEqual(running.actions.map((a) => [a.id, a.enabled]), [['start', false], ['stop', true]]);
+    assert.equal(running.last.label, 'Start');
+    assert.equal(running.last.code, 0);
+    assert.deepEqual(running.log, ['booting', 'up']);
+
+    await post(url, '/api/resource', { id: 'box', action: 'stop' });
+    await waitFor(async () => (await view()).state === 'stopped', 'the box to stop');
+  } finally {
+    stop();
+  }
+});
+
+test('a status command that fails shows as an error with its message, not a hang', async () => {
+  const s = resourceSandbox({ status: `node "${FAKE}" broken` });
+  const { url, stop } = await startDashboard(s);
+  try {
+    const v = (await (await fetch(`${url}/api/resources`)).json()).resources[0];
+    assert.equal(v.state, 'error');
+    assert.match(v.error, /on fire/);
+  } finally {
+    stop();
+  }
+});
+
+test('config problems reach the page, and the page is served with the Resources tab', async () => {
+  const s = resourceSandbox();
+  writeFileSync(join(s.dir, 'config.json'), JSON.stringify({ resources: [{ id: 'x y' }] }));
+  const { url, stop } = await startDashboard(s);
+  try {
+    const data = await (await fetch(`${url}/api/resources`)).json();
+    assert.deepEqual(data.resources, []);
+    assert.match(data.problems[0], /id must be/);
+    const page = await (await fetch(url)).text();
+    assert.match(page, /id="nav-resources"/);
+    assert.match(page, /id="view-resources"/);
+  } finally {
+    stop();
+  }
+});
+
+test('the resources command lists each resource and runs one of its actions', () => {
+  const s = resourceSandbox();
+  const list = s.cli(['resources']);
+  assert.equal(list.status, 0, list.stderr);
+  assert.match(list.stdout, /Test box: stopped - a test box/);
+  assert.match(list.stdout, /Cost: \$0\.27\/hr/);
+  assert.match(list.stdout, /actions: start, \(stop\)/);
+  const ran = s.cli(['resources', 'box', 'start']);
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(readFileSync(s.stateFile, 'utf8').trim(), 'running');
+  assert.match(s.cli(['resources', 'box', 'launch']).stderr, /no action "launch"/);
+  assert.notEqual(s.cli(['resources', 'ghost', 'start']).status, 0);
+  assert.match(sandbox().cli(['resources']).stdout, /No resources configured/);
 });

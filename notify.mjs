@@ -13,6 +13,8 @@
 //   npx agent-notify autostart [on|off]          start the dashboard at login (Windows)
 //   npx agent-notify hotkey [on|off] [--key K]   open the board as an app window from anywhere (Windows, default Ctrl+Alt+B)
 //   npx agent-notify tray                        tray icon + global hotkey (Scroll Lock) that shows and hides the board as a popup
+//   npx agent-notify resources [id action]       the state of each configured resource (a GPU pod, a dev server); with an id and an
+//                                                action, runs that action. The dashboard shows the same as a tab; see "resources" below.
 //   npx agent-notify test                        send a sample to each configured channel
 //   npx agent-notify clear                      hide finished sessions from the board (they return if they start working again)
 //   npx agent-notify mute <2h|30m|off>           silence every channel for a while (the board
@@ -40,7 +42,7 @@
 // The board is one small file per session under the OS temp dir. A prompt or any tool use marks a
 // session running (so work that no prompt started still shows), and it leaves the board when its
 // Claude Code process has exited.
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -777,6 +779,16 @@ async function dashboard({ open }) {
           if (req.url === '/api/dismiss') {
             return json(200, { dismissed: dismiss(body.session) });
           }
+          if (req.url === '/api/resource') {
+            const r = configuredResources().resources.find((x) => x.id === body.id);
+            if (!r) throw new Error('unknown resource');
+            const view = await resourceView(r);
+            const a = view.actions.find((x) => x.id === body.action);
+            if (!a) throw new Error('unknown action');
+            if (!a.enabled) throw new Error(`"${a.label}" is not available while it is ${view.state}`);
+            startAction(r, a.id);
+            return json(200, await resourceView(r, { force: true }));
+          }
           if (req.url === '/api/test') {
             if (!CHANNEL_NAMES.includes(body.channel)) throw new Error('unknown channel');
             const [result] = await send({ label: 'agent-notify', state: 'done', body: 'test notification' }, { ...loadConfig({ fileOnly: true }), channels: [body.channel] });
@@ -787,6 +799,11 @@ async function dashboard({ open }) {
         .catch((err) => json(400, { error: err.message }));
     } else if (req.url === '/api/config') {
       json(200, settingsView());
+    } else if (req.url === '/api/resources') {
+      const { resources, problems } = configuredResources();
+      Promise.all(resources.map((r) => resourceView(r)))
+        .then((views) => json(200, { now: Date.now(), resources: views, problems }))
+        .catch((err) => json(500, { error: err.message }));
     } else if (req.url === '/api/status') {
       const until = muteUntil();
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -818,6 +835,190 @@ async function dashboard({ open }) {
       spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
     }
   });
+}
+
+// ---- resources: things you start and stop and want the state of, such as a GPU pod or a dev server ----
+//
+// Configured in ~/.agent-notify.json (the settings page doesn't edit it):
+//   "resources": [{
+//     "id": "pod", "name": "GPU pod", "cwd": "C:/code/project", "poll": 10,
+//     "status": "node scripts/pod.mjs status --json",
+//     "actions": [
+//       { "id": "start", "label": "Start", "command": "node scripts/pod.mjs start" },
+//       { "id": "stop", "label": "Stop", "command": "node scripts/pod.mjs stop", "confirm": "Stop the pod?" }
+//     ]
+//   }]
+// `status` prints one line of JSON: { "state": "running", "title": "GPU pod", "note": "...", "actions": ["stop"],
+//   "fields": [{ "label": "Cost", "value": "$0.27/hr" }] }. `state` is running, starting, stopped or error (anything else
+// shows as unknown). `actions`, when present, lists which configured actions make sense right now; the rest are greyed
+// out. The page only ever sends a resource id and an action id: every command comes from this file, never from a request.
+
+const RESOURCE_STATES = ['running', 'starting', 'stopped', 'error', 'unknown'];
+const idOk = (id) => /^[\w-]{1,40}$/.test(id ?? '');
+
+/** The `resources` list from the config, cleaned up, plus a message for each entry that was skipped. */
+export function normalizeResources(list) {
+  const resources = [];
+  const problems = [];
+  const seen = new Set();
+  for (const [i, r] of (Array.isArray(list) ? list : []).entries()) {
+    if (!r || typeof r !== 'object') problems.push(`resources[${i}] is not an object`);
+    else if (!idOk(r.id)) problems.push(`resources[${i}]: id must be 1-40 letters, digits, - or _`);
+    else if (seen.has(r.id)) problems.push(`resources[${i}]: id "${r.id}" is used twice`);
+    else if (typeof r.status !== 'string' || !r.status.trim()) problems.push(`${r.id}: needs a "status" command`);
+    else {
+      const actions = [];
+      for (const a of Array.isArray(r.actions) ? r.actions : []) {
+        if (!idOk(a?.id) || typeof a.command !== 'string' || !a.command.trim() || actions.some((x) => x.id === a.id)) {
+          problems.push(`${r.id}: an action needs its own id and a "command"`);
+          continue;
+        }
+        actions.push({ id: a.id, label: String(a.label ?? a.id), command: a.command, confirm: a.confirm ? String(a.confirm) : undefined });
+      }
+      seen.add(r.id);
+      resources.push({ id: r.id, name: String(r.name ?? r.id), cwd: r.cwd ? String(r.cwd) : undefined, status: r.status, actions, poll: Math.max(3, Number(r.poll) || 10) });
+    }
+  }
+  return { resources, problems };
+}
+
+/** What a status command printed, as the page shows it. The last line that starts with { is the answer. */
+export function parseStatus(out) {
+  const line = String(out).split(/\r?\n/).reverse().find((l) => l.trim().startsWith('{'));
+  let j;
+  try {
+    j = JSON.parse(line);
+  } catch {
+    return { state: 'unknown', error: 'the status command did not print a line of JSON' };
+  }
+  return {
+    state: RESOURCE_STATES.includes(j.state) ? j.state : 'unknown',
+    title: j.title ? String(j.title) : undefined,
+    note: j.note ? String(j.note) : undefined,
+    fields: (Array.isArray(j.fields) ? j.fields : []).slice(0, 20).map((f) => ({ label: String(f?.label ?? ''), value: String(f?.value ?? '') })),
+    actions: Array.isArray(j.actions) ? j.actions.map(String) : undefined,
+  };
+}
+
+const resourceRuntime = new Map(); // id -> { cache: { at, status }, inflight, job, last }, kept while the dashboard runs
+const rt = (id) => resourceRuntime.get(id) ?? resourceRuntime.set(id, {}).get(id);
+const resourceLog = (id) => join(DIR, 'resources', `${id}.log`);
+const tail = (file, n = 14) => {
+  try {
+    return readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).slice(-n);
+  } catch {
+    return [];
+  }
+};
+
+/** Runs a shell command to the end; resolves { code, out } (stdout and stderr together), never rejects. code null = timed out. */
+function capture(command, cwd, timeout) {
+  return new Promise((resolve) => {
+    let out = '';
+    let done = false;
+    const p = spawn(command, { shell: true, cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const finish = (code) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ code, out });
+    };
+    const timer = setTimeout(() => {
+      p.kill();
+      finish(null);
+    }, timeout);
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (out += d));
+    p.on('error', (e) => {
+      out += e.message;
+      finish(-1);
+    });
+    p.on('close', finish);
+  });
+}
+
+/** The resource's status, from the cache while it is fresh. Concurrent askers share one command run. */
+async function refreshResource(r, { force = false } = {}) {
+  const s = rt(r.id);
+  if (!force && s.cache && Date.now() - s.cache.at < r.poll * 1000) return s.cache.status;
+  s.inflight ??= capture(r.status, r.cwd, 25000).then(({ code, out }) => {
+    const last = out.trim().split(/\r?\n/).pop() ?? '';
+    const status = code === null ? { state: 'unknown', error: 'the status command timed out' } : code !== 0 ? { state: 'error', error: last.slice(0, 200) || `the status command exited ${code}` } : parseStatus(out);
+    s.cache = { at: Date.now(), status };
+    s.inflight = null;
+    return status;
+  });
+  return s.inflight;
+}
+
+/** One resource as the page draws it. */
+async function resourceView(r, opts) {
+  const s = rt(r.id);
+  const st = await refreshResource(r, opts);
+  const busy = s.job ? { label: s.job.label, since: s.job.since } : null;
+  const enabled = busy ? [] : (st.actions ?? r.actions.map((a) => a.id));
+  return {
+    id: r.id,
+    name: r.name,
+    state: busy ? 'working' : st.state,
+    title: st.title,
+    note: busy ? undefined : st.note,
+    error: st.error,
+    fields: st.fields ?? [],
+    actions: r.actions.map((a) => ({ id: a.id, label: a.label, confirm: a.confirm, enabled: enabled.includes(a.id) })),
+    busy,
+    last: s.last ?? null,
+    log: s.job || s.last ? tail(resourceLog(r.id)) : [],
+    checkedAt: s.cache?.at ?? Date.now(),
+  };
+}
+
+/** Starts one of the resource's configured actions in the background; its output goes to a log file the page tails. */
+export function startAction(r, actionId) {
+  const a = r.actions.find((x) => x.id === actionId);
+  if (!a) throw new Error('unknown action');
+  const s = rt(r.id);
+  if (s.job) throw new Error(`"${s.job.label}" is still running`);
+  mkdirSync(join(DIR, 'resources'), { recursive: true });
+  // The shell does the redirecting (a log file handed over as stdio, or a detached child, loses the output on Windows). unref: the dashboard needn't wait for it.
+  const log = resourceLog(r.id);
+  writeFileSync(log, '');
+  const p = spawn(`${a.command} > "${log}" 2>&1`, { shell: true, cwd: r.cwd, windowsHide: true, stdio: 'ignore' });
+  s.job = { label: a.label, since: Date.now(), pid: p.pid };
+  const end = (code) => {
+    if (s.job?.pid !== p.pid) return;
+    s.last = { label: a.label, code, at: Date.now() };
+    s.job = null;
+    s.cache = null; // the next look asks again
+  };
+  p.on('exit', end);
+  p.on('error', (e) => {
+    writeFileSync(resourceLog(r.id), `${e.message}\n`);
+    end(-1);
+  });
+  p.unref();
+}
+
+const configuredResources = () => normalizeResources(loadConfig({ fileOnly: true }).file.resources);
+
+/** `agent-notify resources`: every resource and its state; `resources <id> <action>` runs one of its actions here and waits. */
+async function resourcesCommand([id, action]) {
+  const { resources, problems } = configuredResources();
+  for (const p of problems) console.error(`config: ${p}`);
+  if (!resources.length) return console.log('No resources configured. Add a "resources" list to ' + CONFIG + ' (see the README).');
+  if (id) {
+    const r = resources.find((x) => x.id === id) ?? fail(`no resource "${id}" (have: ${resources.map((x) => x.id).join(', ')})`);
+    const a = r.actions.find((x) => x.id === action) ?? fail(`"${r.id}" has no action "${action ?? ''}" (have: ${r.actions.map((x) => x.id).join(', ') || 'none'})`);
+    const done = spawnSync(a.command, { shell: true, cwd: r.cwd, stdio: 'inherit' });
+    process.exitCode = done.status ?? 1;
+    return;
+  }
+  for (const r of resources) {
+    const v = await resourceView(r, { force: true });
+    console.log(`${r.name}: ${v.state}${v.error ? ` (${v.error})` : ''}${v.note ? ` - ${v.note}` : ''}`);
+    for (const f of v.fields) console.log(`  ${f.label}: ${f.value.replace(/\n/g, '\n    ')}`);
+    console.log(`  actions: ${v.actions.map((a) => (a.enabled ? a.id : `(${a.id})`)).join(', ') || 'none'}`);
+  }
 }
 
 // ---- setup ----
@@ -1016,10 +1217,12 @@ async function main() {
     console.log(`cleared ${dismiss()} finished session(s) from the board`);
   } else if (cmd === 'mute') {
     mute(rest[0]);
+  } else if (cmd === 'resources') {
+    await resourcesCommand(rest);
   } else if (cmd === 'test') {
     await test();
   } else {
-    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | usage [--since 7d] | dashboard [--open] | autostart [on|off] | hotkey [on|off] [--key Ctrl+Alt+B] | tray | clear | mute [duration|off] | test>');
+    fail('usage: agent-notify <setup [--ntfy] [--remove] | status | usage [--since 7d] | dashboard [--open] | resources [id action] | autostart [on|off] | hotkey [on|off] [--key Ctrl+Alt+B] | tray | clear | mute [duration|off] | test>');
   }
 }
 
