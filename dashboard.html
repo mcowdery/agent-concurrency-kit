@@ -147,6 +147,15 @@
   .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 14px; }
   .facts dt { color: var(--muted); }
   .facts dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
+  .act { display: grid; gap: 6px; }
+  .acthead { font: 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .actrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 14px; background: var(--field); border: 1px solid var(--line); padding: 8px 10px; }
+  .actwho { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .actwho b { font-weight: 600; }
+  .actwho span { color: var(--muted); }
+  .actago { font: 13px/1.45 var(--mono); color: var(--running); white-space: nowrap; text-align: right; }
+  .actwhat { grid-column: 1 / -1; font: 12px/1.45 var(--mono); color: var(--ink); overflow-wrap: anywhere; }
+  .actwhat i { font-style: normal; color: var(--muted); }
   .res .btns { display: flex; gap: 8px; flex-wrap: wrap; }
   .btn:disabled { opacity: .4; cursor: default; }
   .btn:disabled:hover { border-color: var(--line); }
@@ -903,6 +912,30 @@
       for (const f of r.fields) dl.append(el('dt', null, f.label), el('dd', null, f.value));
       card.append(dl);
     }
+    if (r.activity.length) {
+      const act = el('div', 'act');
+      act.append(el('div', 'acthead', 'In use now \u00b7 ' + r.activity.length + (r.activity.length === 1 ? ' run' : ' runs')));
+      for (const a of r.activity) {
+        const row = el('div', 'actrow');
+        const who = el('div', 'actwho');
+        if (a.agent) {
+          who.append(el('b', null, a.agent.label || 'agent'));
+          if (a.agent.topic) who.append(el('span', null, ' \u2014 ' + a.agent.topic));
+        } else {
+          who.append(el('b', null, a.session ? 'agent ' + a.session.slice(0, 8) : 'run from a terminal'));
+          if (a.session) who.append(el('span', null, ' (session no longer on the board)'));
+        }
+        who.title = who.textContent;
+        const ago = el('span', 'actago');
+        if (a.since) ago.dataset.since = a.since;
+        const what = el('div', 'actwhat');
+        what.append(a.title);
+        if (a.detail && a.detail !== a.title) what.append(el('i', null, '  ' + a.detail));
+        row.append(who, ago, what);
+        act.append(row);
+      }
+      card.append(act);
+    }
     if (r.actions.length) {
       const btns = el('div', 'btns');
       for (const a of r.actions) {
@@ -942,6 +975,7 @@
 
   function tickChecked() {
     document.querySelectorAll('.res .checked').forEach((e) => { e.textContent = 'checked ' + age(Date.now() - Number(e.dataset.at)) + ' ago'; });
+    document.querySelectorAll('.res .actago').forEach((e) => { e.textContent = e.dataset.since ? age(Date.now() - Number(e.dataset.since)) : ''; });
   }
   setInterval(tickChecked, 1000);
 

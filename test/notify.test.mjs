@@ -694,3 +694,40 @@ test('the resources command lists each resource and runs one of its actions', ()
   assert.notEqual(s.cli(['resources', 'ghost', 'start']).status, 0);
   assert.match(sandbox().cli(['resources']).stdout, /No resources configured/);
 });
+
+test('a resource can say who is using it: runs tied to agent sessions on the board', async () => {
+  const s = resourceSandbox();
+  s.fire('UserPromptSubmit', { prompt: 'shoot the flooded tunnel and fix the lights' });
+  const since = Date.now() - 90000;
+  writeFileSync(s.stateFile + '.activity', JSON.stringify([
+    { session: 's1', title: 'debug-shots/tunnel.mjs', detail: 'debug-shots/tunnel.mjs out/tunnel dark=1', since },
+    { session: 'gone-session', title: 'scripts/bench.mjs', since },
+    { title: 'by hand' },
+  ]));
+  writeFileSync(s.stateFile, 'running');
+  const { url, stop } = await startDashboard(s);
+  try {
+    const v = (await (await fetch(`${url}/api/resources`)).json()).resources[0];
+    assert.equal(v.activity.length, 3);
+    const [mine, ended, manual] = v.activity;
+    assert.equal(mine.title, 'debug-shots/tunnel.mjs');
+    assert.equal(mine.since, since);
+    assert.match(mine.agent.label, /ack-notify-/);
+    assert.match(mine.agent.topic, /flooded tunnel/);
+    assert.equal(ended.agent, null);
+    assert.equal(manual.agent, null);
+    assert.equal(manual.session, undefined);
+    // the terminal listing names the agent too
+    assert.match(s.cli(['resources']).stdout, /in use: ack-notify-.* \(shoot the flooded tunnel.*\) - debug-shots\/tunnel\.mjs, 1 min/);
+  } finally {
+    stop();
+  }
+});
+
+test('activity in a status answer is cleaned up and capped', () => {
+  const many = Array.from({ length: 50 }, (_, i) => ({ title: `t${i}` }));
+  const st = parseStatus(JSON.stringify({ state: 'running', activity: [{ session: 5, title: 7, detail: 'x'.repeat(500), since: 'soon' }, ...many] }));
+  assert.equal(st.activity.length, 30);
+  assert.deepEqual([st.activity[0].session, st.activity[0].title, st.activity[0].detail.length, st.activity[0].since], ['5', '7', 300, undefined]);
+  assert.deepEqual(parseStatus('{"state":"running"}').activity, []);
+});

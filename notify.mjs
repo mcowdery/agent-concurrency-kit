@@ -851,7 +851,9 @@ async function dashboard({ open }) {
 // `status` prints one line of JSON: { "state": "running", "title": "GPU pod", "note": "...", "actions": ["stop"],
 //   "fields": [{ "label": "Cost", "value": "$0.27/hr" }] }. `state` is running, starting, stopped or error (anything else
 // shows as unknown). `actions`, when present, lists which configured actions make sense right now; the rest are greyed
-// out. The page only ever sends a resource id and an action id: every command comes from this file, never from a request.
+// out. `activity` (optional) says who is using it right now: [{ "session": "<Claude Code session id>", "title": "what",
+//   "detail": "the command", "since": <ms since epoch> }]; a session id found on the board shows that agent and its task.
+// The page only ever sends a resource id and an action id: every command comes from this file, never from a request.
 
 const RESOURCE_STATES = ['running', 'starting', 'stopped', 'error', 'unknown'];
 const idOk = (id) => /^[\w-]{1,40}$/.test(id ?? '');
@@ -897,6 +899,12 @@ export function parseStatus(out) {
     note: j.note ? String(j.note) : undefined,
     fields: (Array.isArray(j.fields) ? j.fields : []).slice(0, 20).map((f) => ({ label: String(f?.label ?? ''), value: String(f?.value ?? '') })),
     actions: Array.isArray(j.actions) ? j.actions.map(String) : undefined,
+    activity: (Array.isArray(j.activity) ? j.activity : []).slice(0, 30).map((a) => ({
+      session: a?.session ? String(a.session) : undefined,
+      title: String(a?.title ?? ''),
+      detail: a?.detail ? String(a.detail).slice(0, 300) : undefined,
+      since: Number(a?.since) || undefined,
+    })),
   };
 }
 
@@ -957,6 +965,11 @@ async function resourceView(r, opts) {
   const st = await refreshResource(r, opts);
   const busy = s.job ? { label: s.job.label, since: s.job.since } : null;
   const enabled = busy ? [] : (st.actions ?? r.actions.map((a) => a.id));
+  const sessions = st.activity?.some((a) => a.session) ? board() : [];
+  const activity = (st.activity ?? []).map((a) => {
+    const s = a.session && sessions.find((x) => x.session === a.session);
+    return { ...a, agent: s ? { label: s.label, topic: s.topic, state: s.state } : null };
+  });
   return {
     id: r.id,
     name: r.name,
@@ -965,6 +978,7 @@ async function resourceView(r, opts) {
     note: busy ? undefined : st.note,
     error: st.error,
     fields: st.fields ?? [],
+    activity,
     actions: r.actions.map((a) => ({ id: a.id, label: a.label, confirm: a.confirm, enabled: enabled.includes(a.id) })),
     busy,
     last: s.last ?? null,
@@ -1017,6 +1031,7 @@ async function resourcesCommand([id, action]) {
     const v = await resourceView(r, { force: true });
     console.log(`${r.name}: ${v.state}${v.error ? ` (${v.error})` : ''}${v.note ? ` - ${v.note}` : ''}`);
     for (const f of v.fields) console.log(`  ${f.label}: ${f.value.replace(/\n/g, '\n    ')}`);
+    for (const a of v.activity) console.log(`  in use: ${a.agent ? `${a.agent.label}${a.agent.topic ? ` (${a.agent.topic.slice(0, 50)})` : ''}` : 'an agent'} - ${a.title}${a.since ? `, ${Math.floor((Date.now() - a.since) / 60000)} min` : ''}`);
     console.log(`  actions: ${v.actions.map((a) => (a.enabled ? a.id : `(${a.id})`)).join(', ') || 'none'}`);
   }
 }
