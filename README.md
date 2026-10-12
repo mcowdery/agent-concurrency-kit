@@ -1,6 +1,6 @@
 # agent-concurrency-kit
 
-Three small, dependency-free scripts for running several AI coding agents against one codebase at
+Four small, dependency-free scripts for running several AI coding agents against one codebase at
 once without them tripping over each other. No framework, no config service — just git worktrees,
 lockfiles and a few Claude Code hooks, which is all this problem actually needs.
 
@@ -64,6 +64,25 @@ await withLock('gpu', 'exclusive', async () => {
 
 A holder's lock is a file in the OS temp directory, named by its process id — if that process dies,
 the next check clears the lock automatically, so a crashed run can't jam the queue.
+
+## `agent-changes` — commit your own work from a shared checkout
+
+```
+npx agent-changes setup                  # one-time: adds the hooks to Claude Code
+npx agent-changes list [--all]           # this session's uncommitted files (or every session's)
+npx agent-changes add <path>...          # record files a Bash command changed
+npx agent-changes commit -m "msg" [--push] [--shared]
+```
+
+When several agents share one checkout, each has to work out from `git status` which changes are its
+own before it can commit. This logs it instead: a hook records every file a session edits or writes,
+and `commit` stages and commits just those files. Other agents' edits stay uncommitted, and anything
+they've staged stays staged.
+
+Tracking is per file, not per line. If two sessions edited the same file, `commit` leaves it out and
+says so; `--shared` commits it anyway, other session's lines included. Edits made by shell commands
+(a formatter, codegen) aren't seen by the hook; record them with `add`. If your agents' work overlaps
+like this often, give each its own checkout with `agent-worktree` instead.
 
 ## `agent-notify` — hear from your agents instead of checking on them
 

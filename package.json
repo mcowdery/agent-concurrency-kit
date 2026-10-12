@@ -1,18 +1,20 @@
 {
   "name": "agent-concurrency-kit",
   "version": "0.1.0",
-  "description": "Three small, dependency-free tools for running several AI coding agents against one codebase: isolated git worktrees, a lockfile queue for a resource only one agent can use at a time (a GPU, a port, a rate-limited API), and notifications (desktop, phone, Discord/Slack) plus a status board for when each Claude Code session finishes or needs you.",
+  "description": "Four small, dependency-free tools for running several AI coding agents against one codebase: isolated git worktrees, a lockfile queue for a resource only one agent can use at a time (a GPU, a port, a rate-limited API), per-session change tracking so each agent commits only its own files, and notifications (desktop, phone, Discord/Slack) plus a status board for when each Claude Code session finishes or needs you.",
   "license": "MIT",
   "type": "module",
   "bin": {
     "agent-worktree": "./worktree.mjs",
     "agent-resource-queue": "./resource-queue.mjs",
-    "agent-notify": "./notify.mjs"
+    "agent-notify": "./notify.mjs",
+    "agent-changes": "./changes.mjs"
   },
   "files": [
     "worktree.mjs",
     "resource-queue.mjs",
     "notify.mjs",
+    "changes.mjs",
     "dashboard.html"
   ],
   "scripts": {
